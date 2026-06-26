@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { useMempoolMonitor } from './hooks/useMempoolMonitor';
+import { useMempoolMonitor, FeedStatus } from './hooks/useMempoolMonitor';
 import {
   Activity,
   Zap,
@@ -29,10 +29,13 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-const POLYGON_RPC = 'https://polygon-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
-const SOLANA_RPC = 'https://solana-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
 const TREASURY_ADDRESS = '0xCD339078D159404D29000A6716D962C8833ABfe8';
+const INFURA_KEY_FALLBACK = '09760d45e6844c8b95cc8af069f96160';
+const ALCHEMY_WS  = 'wss://polygon-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
+const INFURA_WS   = `wss://polygon-mainnet.infura.io/ws/v3/${import.meta.env.VITE_INFURA_KEY || INFURA_KEY_FALLBACK}`;
+const POLYGON_RPC = 'https://polygon-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
 const OPTIMIZER_ENDPOINT = `${supabaseUrl}/functions/v1/route-optimizer`;
+const EXECUTOR_ENDPOINT = `${supabaseUrl}/functions/v1/execute-route`;
 
 type Tab = 'dashboard' | 'transactions' | 'optimizations' | 'access' | 'vault' | 'settings' | 'testing';
 type Status = 'idle' | 'running' | 'paused';
@@ -214,7 +217,7 @@ function App() {
     return () => clearInterval(iv);
   }, [fetchMetrics, fetchTransactions, fetchOptimizations, fetchVault]);
 
-  useMempoolMonitor({
+  const { feedStatus } = useMempoolMonitor({
     enabled: serviceStatus === 'running',
     minGasPrice: 5e9,
     onTransaction: async (tx, _chain, result) => {
@@ -301,6 +304,26 @@ function App() {
     setShowWithdrawModal(false);
     setWithdrawAddress('');
     setWithdrawAmount('');
+  };
+
+  const executeOptimization = async (optimizationId: string) => {
+    try {
+      const res = await fetch(`${EXECUTOR_ENDPOINT}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ optimizationId }),
+      });
+      const result = await res.json();
+
+      if (result.success) {
+        pushAlert('success', `Executed: ${result.profitMade?.toFixed(6) || '0'} MATIC profit, ${result.gasSaved?.toLocaleString() || 0} gas saved`);
+        fetchOptimizations(optPage);
+      } else {
+        pushAlert('warning', result.error || 'Execution failed');
+      }
+    } catch (err) {
+      pushAlert('error', 'Failed to execute optimization');
+    }
   };
 
   const runTestTransaction = async () => {
@@ -457,37 +480,38 @@ function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
-                <div className="flex items-center gap-3 mb-4">
-                  <Server className="w-5 h-5 text-cyan-400" />
-                  <h3 className="font-semibold">Live Endpoints</h3>
-                </div>
-                <div className="space-y-3">
-                  <div className="bg-slate-800 rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-slate-400">Polygon Mainnet WebSocket</span>
-                      <div className="flex items-center gap-1">
-                        <div className={`w-2 h-2 rounded-full ${serviceStatus === 'running' ? 'bg-emerald-500 animate-pulse' : 'bg-slate-500'}`} />
-                        <span className="text-xs text-slate-400">{serviceStatus === 'running' ? 'live' : 'idle'}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <p className="font-mono text-xs text-slate-300 break-all flex-1">{POLYGON_RPC.replace('https://', 'wss://')}</p>
-                      <button onClick={() => copyToClipboard(POLYGON_RPC)} className="shrink-0 p-1 hover:bg-slate-700 rounded">
-                        <Copy className="w-3 h-3 text-slate-400" />
-                      </button>
-                    </div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <Server className="w-5 h-5 text-cyan-400" />
+                    <h3 className="font-semibold">Dual Feed — Polygon Mainnet</h3>
                   </div>
-                  <div className="bg-slate-800 rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-slate-400">Solana Mainnet RPC</span>
-                      <div className="flex items-center gap-1">
-                        <div className="w-2 h-2 rounded-full bg-slate-500" />
-                        <span className="text-xs text-slate-400">standby</span>
-                      </div>
-                    </div>
-                    <p className="font-mono text-xs text-slate-300 break-all">{SOLANA_RPC}</p>
-                  </div>
+                  {serviceStatus === 'running' && (
+                    <span className="text-xs text-slate-400">
+                      {feedStatus.txPerMin > 0 ? `~${feedStatus.txPerMin} tx/min` : 'counting…'}
+                    </span>
+                  )}
                 </div>
+                <div className="space-y-2">
+                  <FeedRow
+                    provider="Primary (Blast)"
+                    wsUrl={feedStatus.activeRpc || 'Connecting...'}
+                    status={feedStatus.primary}
+                    activeRpc={feedStatus.activeRpc}
+                    onCopy={() => copyToClipboard(feedStatus.activeRpc)}
+                  />
+                  <FeedRow
+                    provider="Secondary (Infura)"
+                    wsUrl={INFURA_WS}
+                    status={feedStatus.secondary}
+                    activeRpc={feedStatus.activeRpc}
+                    onCopy={() => copyToClipboard(INFURA_WS)}
+                  />
+                </div>
+                <p className="mt-3 text-xs text-slate-500">
+                  Both streams run concurrently. Transactions are deduplicated by hash —
+                  whichever feed delivers first wins. Full tx details fetched from
+                  whichever RPC responds faster.
+                </p>
               </div>
 
               <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
@@ -716,6 +740,7 @@ function App() {
                     <th className="px-3 py-3 text-left text-slate-400">Confidence</th>
                     <th className="px-3 py-3 text-left text-slate-400">Status</th>
                     <th className="px-3 py-3 text-left text-slate-400">Time</th>
+                    <th className="px-3 py-3 text-left text-slate-400">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
@@ -742,10 +767,20 @@ function App() {
                         <td className="px-3 py-2 text-slate-500 whitespace-nowrap">
                           {new Date(opt.created_at).toLocaleString()}
                         </td>
+                        <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                          {opt.status === 'simulated' && (
+                            <button
+                              onClick={() => executeOptimization(opt.id)}
+                              className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 rounded text-xs font-medium transition-colors"
+                            >
+                              Execute
+                            </button>
+                          )}
+                        </td>
                       </tr>
                       {expandedOpt === opt.id && opt.simulation_trace && (
                         <tr key={`${opt.id}-exp`} className="bg-slate-800/20">
-                          <td colSpan={8} className="px-4 py-3">
+                          <td colSpan={9} className="px-4 py-3">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-1 mb-2">
                               <DataRow label="From Address" value={opt.input_token} copy />
                               <DataRow label="To Address" value={opt.output_token} copy />
@@ -986,6 +1021,7 @@ function App() {
                 <VerificationItem label="Polygon RPC Configured" status={!!POLYGON_RPC} />
                 <VerificationItem label="Treasury Address Set" status={!!TREASURY_ADDRESS} detail={TREASURY_ADDRESS} />
                 <VerificationItem label="Edge Function Deployed" status={!!OPTIMIZER_ENDPOINT} detail={OPTIMIZER_ENDPOINT} />
+                <VerificationItem label="Executor Function Deployed" status={!!EXECUTOR_ENDPOINT} detail={EXECUTOR_ENDPOINT} />
                 <VerificationItem label="Service Fee Configured" status={SERVICE_CONFIG.feePercent > 0} detail={`${(SERVICE_CONFIG.feePercent * 100).toFixed(1)}%`} />
                 <VerificationItem label="Persistent Logs Active" status={txTotal > 0 || mempoolTransactions.length === 0} detail={`${txTotal.toLocaleString()} transactions stored`} />
               </div>
@@ -1023,7 +1059,8 @@ function App() {
                   <ul className="space-y-1 text-slate-300 text-xs">
                     <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Alchemy API — Polygon + Solana mainnet RPC active</li>
                     <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Supabase — persistent database provisioned</li>
-                    <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Edge Function deployed at {OPTIMIZER_ENDPOINT}</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Optimizer API at {OPTIMIZER_ENDPOINT}</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Executor API at {EXECUTOR_ENDPOINT}</li>
                     <li className="flex items-center gap-2"><CheckCircle className="w-3.5 h-3.5 text-emerald-500" /> Treasury wallet set: <span className="font-mono text-emerald-400 break-all">{TREASURY_ADDRESS}</span></li>
                   </ul>
                 </div>
@@ -1150,6 +1187,42 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span className={`px-1.5 py-0.5 rounded text-xs border ${styles[status] || 'bg-slate-700 text-slate-300'}`}>{status}</span>
+  );
+}
+
+function FeedRow({ provider, wsUrl, status, activeRpc, onCopy }: {
+  provider: string;
+  wsUrl: string;
+  status: 'connecting' | 'connected' | 'disconnected' | 'polling';
+  activeRpc?: string;
+  onCopy: () => void;
+}) {
+  const dot: Record<string, string> = {
+    connected:    'bg-emerald-500 animate-pulse',
+    connecting:   'bg-amber-400 animate-pulse',
+    polling:      'bg-cyan-500 animate-pulse',
+    disconnected: 'bg-slate-600',
+  };
+  const label: Record<string, string> = {
+    connected:    'live',
+    connecting:   'connecting…',
+    polling:       'polling',
+    disconnected: 'offline',
+  };
+  return (
+    <div className="bg-slate-800 rounded-lg p-3">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${dot[status]}`} />
+          <span className="text-xs font-medium text-slate-300">{provider}</span>
+          <span className={`text-xs ${status === 'connected' || status === 'polling' ? 'text-emerald-400' : 'text-slate-500'}`}>{label[status]}</span>
+        </div>
+        <button onClick={onCopy} className="p-1 hover:bg-slate-700 rounded">
+          <Copy className="w-3 h-3 text-slate-500" />
+        </button>
+      </div>
+      <p className="font-mono text-xs text-slate-500 break-all">{wsUrl}</p>
+    </div>
   );
 }
 

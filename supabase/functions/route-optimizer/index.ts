@@ -11,8 +11,25 @@ const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-const POLYGON_RPC = 'https://polygon-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
+const ALCHEMY_RPC  = 'https://polygon-mainnet.g.alchemy.com/v2/wf-n8242VyUxgSwmWNs9h';
+const INFURA_KEY   = Deno.env.get('INFURA_KEY') || '09760d45e6844c8b95cc8af069f96160';
+const INFURA_RPC   = `https://polygon-mainnet.infura.io/v3/${INFURA_KEY}`;
 const TREASURY_ADDRESS = '0xCD339078D159404D29000A6716D962C8833ABfe8';
+
+async function rpcCall(method: string, params: unknown[]): Promise<unknown> {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+  const headers = { 'Content-Type': 'application/json' };
+  try {
+    const res = await Promise.any([
+      fetch(INFURA_RPC,  { method: 'POST', headers, body }),
+      fetch(ALCHEMY_RPC, { method: 'POST', headers, body }),
+    ]);
+    const data = await res.json();
+    return data.result;
+  } catch {
+    return null;
+  }
+}
 
 interface OptimizeRequest {
   transactionHash?: string;
