@@ -17,7 +17,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'settings';
 interface Alert { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
-interface TreasuryEntry { id: string; type: string; amount_usd: number; chain: string | null; tx_hash: string | null; created_at: string; }
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
@@ -59,7 +58,10 @@ export default function App() {
       if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
 
       const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
-      if (treasuryData) { setTotalProfit((treasuryData as TreasuryEntry[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0)); }
+      if (treasuryData) {
+        const profit = (treasuryData as any[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
+        setTotalProfit(profit);
+      }
 
       const { data: walletData } = await supabase.from('arb_wallet').select('deployed_contracts').order('created_at', { ascending: false }).limit(1).maybeSingle();
       if (walletData?.deployed_contracts) setDeployedContracts(walletData.deployed_contracts);
@@ -141,14 +143,22 @@ export default function App() {
     setAllOpportunities(opps);
 
     if (opps.length > 0) {
-      supabase.from('arb_opportunities').insert(opps.map(opp => ({
-        chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
-        flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
-        estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
-        net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
-        confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
-        block_number: opp.blockNumber, executed: false,
-      }))).then(({ error }) => { if (error) console.error('Insert error:', error); });
+      await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
+        body: JSON.stringify({
+          action: 'db_insert',
+          table: 'arb_opportunities',
+          data: opps.map(opp => ({
+            chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
+            flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
+            estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
+            net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
+            confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
+            block_number: opp.blockNumber, executed: false,
+          })),
+        }),
+      });
     }
 
     if (autoExecute && wallet?.signer) {
@@ -168,11 +178,18 @@ export default function App() {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
       pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (zero gas!)`);
-      await supabase.from('arb_treasury').insert({ type: 'profit', amount_usd: result.profitUsd || 0, chain: opp.chain, tx_hash: result.txHash, opportunity_type: opp.opportunityType });
+      await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
+        body: JSON.stringify({
+          action: 'db_insert',
+          table: 'arb_treasury',
+          data: { type: 'profit', amount_usd: result.profitUsd || 0, chain: opp.chain, tx_hash: result.txHash, opportunity_type: opp.opportunityType },
+        }),
+      });
     } else {
       setFailedCount(prev => prev + 1);
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
-      if (result.autoFixed) pushAlert('info', `Auto-fix: ${result.autoFixed}`);
     }
     setExecuting(false);
   };
@@ -331,7 +348,7 @@ export default function App() {
                         opp.opportunityType === 'two_dex' ? 'bg-blue-950/50 text-blue-300' : 'bg-cyan-950/50 text-cyan-300'
                       }`}>{opp.opportunityType}</span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' → ')}</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' \u003e ')}</span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
                       <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(2)}</span>
                       <span className="text-xs text-slate-500">{opp.profitMarginPct.toFixed(2)}%</span>
@@ -375,7 +392,7 @@ export default function App() {
                         <button onClick={handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium">Import Wallet</button>
                       </div>
                     )}
-                    {!showImport && <button onClick={() => setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">Import existing wallet →</button>}
+                    {!showImport && <button onClick={() => setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">Import existing wallet{' >'}</button>}
                   </div>
                 </div>
               ) : !wallet.isUnlocked ? (
@@ -420,7 +437,7 @@ export default function App() {
                         opp.opportunityType === 'two_dex' ? 'bg-blue-950/50 text-blue-300' : 'bg-cyan-950/50 text-cyan-300'
                       }`}>{opp.opportunityType}</span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' → ')}</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' \u003e ')}</span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
                       <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(2)}</span>
                       <span className="text-xs text-slate-500">{opp.profitMarginPct.toFixed(2)}%</span>
@@ -461,41 +478,11 @@ export default function App() {
                 <Sparkles className="w-4 h-4 text-emerald-400" /> Zero-Gas Architecture
               </h3>
               <div className="space-y-3 text-sm text-slate-400">
-                <div className="flex items-start gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-slate-300">Gelato Gas Tank</p>
-                    <p className="text-xs">Deposit USDC once (any chain). Gelato pays gas on ALL chains. No native tokens needed by anyone.</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-slate-300">Self-Funding from First Arb</p>
-                    <p className="text-xs">The first profitable arbitrage generates USDC. 10% auto-deposits to the Gas Tank, funding all future gas. Zero upfront capital.</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-slate-300">Profit Distribution</p>
-                    <p className="text-xs">85% to your wallet · 5% to Gelato relay fee · 10% to Gas Tank reserve. No reinvestment, no lockup.</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-slate-300">EIP-712 Gasless Signing</p>
-                    <p className="text-xs">You sign off-chain (free). Gelato relays the transaction. Your wallet never holds native tokens.</p>
-                  </div>
-                </div>
-                <div className="flex items-start gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-slate-300">Private Mempool</p>
-                    <p className="text-xs">Gelato routes through private mempools, protecting against front-running and sandwich attacks.</p>
-                  </div>
-                </div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Gelato Gas Tank</p><p className="text-xs">Deposit USDC once (any chain). Gelato pays gas on ALL chains. No native tokens needed by anyone.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Self-Funding from First Arb</p><p className="text-xs">The first profitable arbitrage generates USDC. 10% auto-deposits to the Gas Tank, funding all future gas. Zero upfront capital.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Profit Distribution</p><p className="text-xs">85% to your wallet · 5% to Gelato relay fee · 10% to Gas Tank reserve. No reinvestment, no lockup.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">EIP-712 Gasless Signing</p><p className="text-xs">You sign off-chain (free). Gelato relays the transaction. Your wallet never holds native tokens.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Private Mempool</p><p className="text-xs">Gelato routes through private mempools, protecting against front-running and sandwich attacks.</p></div></div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
                   <p className="text-xs text-slate-500">Relayer Status: {relayerMode === 'gelato' ? <span className="text-emerald-400">Gelato Gas Tank Active</span> : relayerMode === 'direct' ? <span className="text-cyan-400">Direct Relay (relayer wallet pays gas)</span> : relayerMode === 'unconfigured' ? <span className="text-amber-400">Unconfigured — set GELATO_API_KEY or RELAYER_PRIVATE_KEY</span> : <span className="text-slate-400">Checking...</span>}</p>
                 </div>
@@ -521,30 +508,12 @@ export default function App() {
                 <Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas Cycle
               </h3>
               <div className="space-y-2 text-sm text-slate-400">
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span>
-                  <span>Scanner finds profitable arbitrage opportunity</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span>
-                  <span>User signs EIP-712 message (free, off-chain)</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span>
-                  <span>Gelato relays transaction, pays gas from Gas Tank</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span>
-                  <span>Flash loan executes, profit generated in USDC</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span>
-                  <span>85% to wallet · 5% pays Gelato fee · 10% replenishes Gas Tank</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="w-5 h-5 rounded-full bg-cyan-600 flex items-center justify-center text-white">↻</span>
-                  <span className="text-cyan-300">Gas Tank now has USDC — next arb is fully self-funded</span>
-                </div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span><span>Scanner finds profitable arbitrage opportunity</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>User signs EIP-712 message (free, off-chain)</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Gelato relays transaction, pays gas from Gas Tank</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Flash loan executes, profit generated in USDC</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>85% to wallet · 5% pays Gelato fee · 10% replenishes Gas Tank</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-cyan-600 flex items-center justify-center text-white">↻</span><span className="text-cyan-300">Gas Tank now has USDC — next arb is fully self-funded</span></div>
               </div>
             </div>
 

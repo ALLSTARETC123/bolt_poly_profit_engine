@@ -3,24 +3,18 @@
  *
  * Zero-gas architecture:
  * 1. User signs EIP-712 message in browser (free, off-chain)
- * 2. Edge function sends to Gelato Relay API (sponsoredCallERC2771)
+ * 2. Edge function sends to Gelato Relay API
  * 3. Gelato pays gas, submits tx on-chain
  * 4. Contract pays Gelato fee from flash loan profit in USDC
- * 5. 10% of profit auto-deposited to Gelato Gas Tank for future gas
- *
- * The first arb earns the USDC that funds ALL subsequent gas.
- * Zero upfront capital required from anyone.
+ * 5. 10% of profit auto-deposits to Gelato Gas Tank for future gas
  */
 
 import { ethers } from 'ethers';
-import { createClient } from '@supabase/supabase-js';
 import { CHAINS } from './chains';
 import { ArbitrageOpportunity } from './scanner';
-import executorBytecode from './FlashArbExecutor.bin.txt?raw';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabaseUrl = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env.VITE_SUPABASE_URL : '';
+const supabaseKey = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env.VITE_SUPABASE_ANON_KEY : '';
 
 export const EXECUTOR_ABI = [
   'function executeArb(address asset, uint256 amount, bytes params) external',
@@ -29,25 +23,17 @@ export const EXECUTOR_ABI = [
   'function setV2Router(string name, address router) external',
   'function setV3Router(address router) external',
   'function setGelatoRelayer(address _relayer) external',
-  'function setFeeToken(address _feeToken) external',
-  'function setGelatoFeeCollector(address _collector) external',
   'function owner() view returns (address)',
   'function gelatoRelayer() view returns (address)',
   'function totalProfit() view returns (uint256)',
-  'function totalGasFeesPaid() view returns (uint256)',
   'function gasReserve() view returns (uint256)',
   'function nonces(address) view returns (uint256)',
-  'function replenishGasTank(address to, uint256 amount) external',
-  'function withdrawProfit(address token, address to) external',
-  'function getBalance(address token) view returns (uint256)',
-  'event ArbExecuted(address indexed asset, uint256 borrowed, uint256 profit, uint256 toOwner, uint256 toGelato, uint256 toReserve, uint8 provider)',
-  'event GasFeePaid(uint256 fee, address indexed feeToken)',
+  'event ArbExecuted(address indexed asset, uint256 borrowed, uint256 profit, uint8 provider)',
 ];
 
 export interface ExecutionResult {
   success: boolean; txHash: string | null; error: string | null;
-  gasUsed: number | null; profitUsd: number | null;
-  autoFixed: string | null; gasless: boolean;
+  gasUsed: number | null; profitUsd: number | null; gasless: boolean;
 }
 
 export interface DeploymentResult {
@@ -77,8 +63,6 @@ export async function deployExecutorGasless(
         v3Router,
         feeToken: usdc.address,
         gelatoFeeCollector: chain.gelatoFeeCollector,
-        bytecode: executorBytecode,
-        abi: EXECUTOR_ABI,
         dexConfigs: chain.dexes.map(d => ({ name: d.name, router: d.router, type: d.type })),
       }),
     });
@@ -118,7 +102,7 @@ export async function executeArbitrageGasless(
   dodoPoolAddress: string | null,
 ): Promise<ExecutionResult> {
   const chain = CHAINS[chainKey];
-  if (!chain) return { success: false, txHash: null, error: 'Unknown chain', gasUsed: null, profitUsd: null, autoFixed: null, gasless: false };
+  if (!chain) return { success: false, txHash: null, error: 'Unknown chain', gasUsed: null, profitUsd: null, gasless: false };
 
   try {
     const provider = new ethers.JsonRpcProvider(chain.rpc[0]);
@@ -162,32 +146,27 @@ export async function executeArbitrageGasless(
 
     if (!response.ok) {
       const errText = await response.text();
-      return { success: false, txHash: null, error: `Relayer error: ${errText.slice(0, 200)}`, gasUsed: null, profitUsd: null, autoFixed: null, gasless: false };
+      return { success: false, txHash: null, error: `Relayer error: ${errText.slice(0, 200)}`, gasUsed: null, profitUsd: null, gasless: false };
     }
 
     const result = await response.json();
     return result.success
-      ? { success: true, txHash: result.txHash, error: null, gasUsed: result.gasUsed, profitUsd: opp.netProfit, autoFixed: null, gasless: true }
-      : { success: false, txHash: result.txHash || null, error: result.error, gasUsed: result.gasUsed || null, profitUsd: null, autoFixed: result.autoFixed || null, gasless: true };
+      ? { success: true, txHash: result.txHash, error: null, gasUsed: result.gasUsed, profitUsd: opp.netProfit, gasless: true }
+      : { success: false, txHash: result.txHash || null, error: result.error, gasUsed: result.gasUsed || null, profitUsd: null, gasless: true };
   } catch (err: any) {
-    return { success: false, txHash: null, error: err.message, gasUsed: null, profitUsd: null, autoFixed: null, gasless: false };
+    return { success: false, txHash: null, error: err.message, gasUsed: null, profitUsd: null, gasless: false };
   }
 }
 
 export async function getOnChainTreasury(
-  provider: ethers.JsonRpcProvider, executorAddress: string, chainKey: string,
-): Promise<{ totalProfit: string; gasReserve: string; totalGasFeesPaid: string }> {
+  provider: ethers.JsonRpcProvider, executorAddress: string,
+): Promise<{ totalProfit: string; gasReserve: string }> {
   try {
     const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, provider);
-    const [totalProfit, gasReserve, totalGasFeesPaid] = await Promise.all([
+    const [totalProfit, gasReserve] = await Promise.all([
       executor.totalProfit().catch(() => 0n),
       executor.gasReserve().catch(() => 0n),
-      executor.totalGasFeesPaid().catch(() => 0n),
     ]);
-    return {
-      totalProfit: ethers.formatEther(totalProfit),
-      gasReserve: ethers.formatEther(gasReserve),
-      totalGasFeesPaid: ethers.formatEther(totalGasFeesPaid),
-    };
-  } catch { return { totalProfit: '0.0', gasReserve: '0.0', totalGasFeesPaid: '0.0' }; }
+    return { totalProfit: ethers.formatEther(totalProfit), gasReserve: ethers.formatEther(gasReserve) };
+  } catch { return { totalProfit: '0.0', gasReserve: '0.0' }; }
 }
