@@ -13,10 +13,11 @@ import { CHAINS, CHAIN_KEYS } from './lib/chains';
 import { ArbitrageOpportunity, scanChain, scanAllChains } from './lib/scanner';
 import {
   generateWallet, importWallet, unlockWallet, loadWallet,
-  getNativeBalance, WalletState,
+  getNativeBalance, updateDeployedContracts, WalletState,
 } from './lib/wallet';
 import {
   executeArbitrage, autoFixConfig, checkExecutorHealth,
+  deployExecutor, getOnChainTreasury, withdrawProfit,
   ExecutionResult,
 } from './lib/executor';
 
@@ -40,6 +41,8 @@ function App() {
   const [walletLoading, setWalletLoading] = useState(false);
   const [chainBalances, setChainBalances] = useState<Record<string, string>>({});
   const [deployedContracts, setDeployedContracts] = useState<Record<string, string>>({});
+  const [deploying, setDeploying] = useState(false);
+  const [onChainTreasury, setOnChainTreasury] = useState<Record<string, any>>({});
 
   // Engine state
   const [engineRunning, setEngineRunning] = useState(false);
@@ -52,8 +55,8 @@ function App() {
 
   // Config
   const [config, setConfig] = useState<Record<string, any>>({});
-  const [autoExecute, setAutoExecute] = useState(false);
-  const [minProfit, setMinProfit] = useState('0.50');
+  const [autoExecute, setAutoExecute] = useState(true);
+  const [minProfit, setMinProfit] = useState('0.10');
 
   // Treasury
   const [treasuryTotal, setTreasuryTotal] = useState(0);
@@ -109,6 +112,12 @@ function App() {
         setTreasuryEntries(treasuryData);
         const total = treasuryData.filter((t: any) => t.type === 'profit').reduce((s: number, t: any) => s + parseFloat(t.amount_usd || '0'), 0);
         setTreasuryTotal(total);
+      }
+
+      // Load deployed contracts from wallet record
+      const { data: walletData } = await supabase.from('arb_wallet').select('deployed_contracts').order('created_at', { ascending: false }).limit(1).maybeSingle();
+      if (walletData?.deployed_contracts) {
+        setDeployedContracts(walletData.deployed_contracts);
       }
     })();
   }, []);
@@ -219,7 +228,46 @@ function App() {
     setScanning(false);
   }, [scanning, config, engineStatus, pushAlert]);
 
-  // Start/stop engine
+  // One-click deploy + start: deploys executor contracts on all chains, then starts scanning
+  const handleOneClickStart = async () => {
+    if (!wallet?.signer) {
+      pushAlert('error', 'Unlock your wallet first');
+      setActiveTab('wallet');
+      return;
+    }
+
+    setDeploying(true);
+    pushAlert('info', 'Deploying executor contracts on all chains...');
+
+    // Auto-deploy contracts on chains that don't have one yet
+    for (const chainKey of CHAIN_KEYS) {
+      if (!deployedContracts[chainKey]) {
+        const chain = CHAINS[chainKey];
+        const provider = new ethers.JsonRpcProvider(chain.rpc[0]);
+        const signer = wallet.signer!.connect(provider);
+        const result = await deployExecutor(signer, chainKey);
+        if (result.success && result.contractAddress) {
+          const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
+          setDeployedContracts(updated);
+          await updateDeployedContracts(wallet.address, updated);
+          pushAlert('success', `Contract deployed on ${chain.name}: ${result.contractAddress.slice(0, 10)}...`);
+        } else {
+          pushAlert('warning', `Deploy failed on ${chain.name}: ${result.error?.slice(0, 80)}`);
+        }
+      }
+    }
+
+    setDeploying(false);
+
+    // Start the engine
+    setEngineRunning(true);
+    setAutoExecute(true);
+    pushAlert('success', 'Engine started — scanning for zero-fee flash loan arbitrage');
+    runScan();
+    scanIntervalRef.current = window.setInterval(() => runScan(), 15000);
+  };
+
+  // Start/stop engine (simplified — just scanning, deploy is handled by one-click)
   const startEngine = () => {
     setEngineRunning(true);
     pushAlert('success', 'Arbitrage engine started — scanning DEX pools across all chains');
@@ -399,8 +447,10 @@ function App() {
                   <Pause className="w-4 h-4" /> Stop
                 </button>
               ) : (
-                <button onClick={startEngine} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
-                  <Play className="w-4 h-4" /> Start Engine
+                <button onClick={handleOneClickStart} disabled={deploying}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
+                  {deploying ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  {deploying ? 'Deploying...' : 'Start Engine'}
                 </button>
               )}
             </div>
@@ -877,20 +927,19 @@ function App() {
                   <ConfigItem label="Max Gas Price" value={`${config.max_gas_price_gwei || 100} gwei`} />
                   <ConfigItem label="Scan Interval" value={`${config.scan_interval_seconds || 5}s`} />
                   <ConfigItem label="Max Hops" value={config.max_hops || 3} />
-                  <ConfigItem label="Flash Loan Provider" value={config.flash_loan_provider || 'aave_v3'} />
+                  <ConfigItem label="Flash Loan Provider" value="Balancer V2 (0% fee)" />
                   <ConfigItem label="Slippage Tolerance" value={`${config.slippage_tolerance_pct || 0.5}%`} />
                 </div>
               </div>
             </div>
 
-            {/* Contract deployment */}
+            {/* Contract deployment status */}
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-cyan-400" /> Flash Arb Executor Contract
+                <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts (auto-deployed)
               </h3>
               <p className="text-sm text-slate-400 mb-4">
-                The executor contract is deployed on each chain to receive flash loans and execute swaps.
-                You need gas money (native token) in your wallet to deploy.
+                Contracts are deployed automatically when you click "Start Engine". Uses Balancer V2 zero-fee flash loans.
               </p>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
@@ -906,11 +955,8 @@ function App() {
                         </>
                       ) : (
                         <>
-                          <span className="text-xs text-slate-500 flex-1">Not deployed</span>
-                          <button onClick={() => pushAlert('info', `Deploying contract on ${chain.name}... This requires gas money in your wallet.`)}
-                            className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 rounded text-xs font-medium">
-                            Deploy
-                          </button>
+                          <span className="text-xs text-slate-500 flex-1">Auto-deploys on Start</span>
+                          <Clock className="w-4 h-4 text-slate-500" />
                         </>
                       )}
                     </div>
@@ -930,11 +976,12 @@ function App() {
               <div className="space-y-2">
                 {[
                   'High gas price — skips execution, retries when gas drops',
-                  'Insufficient gas funds — alerts you to add more',
+                  'Insufficient gas funds — uses contract gas reserve from profits',
                   'Nonce errors — resets and retries',
                   'Network errors — falls back to alternative RPC',
                   'Front-run detection — marks opportunity as expired',
                   'Contract misconfiguration — re-sets DEX routers automatically',
+                  'Balancer V2 flash loan — zero fee, no Aave 0.05% fee',
                 ].map((fix, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs text-slate-400">
                     <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> {fix}

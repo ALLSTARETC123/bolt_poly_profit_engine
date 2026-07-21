@@ -9,14 +9,11 @@ export interface ChainConfig {
   name: string;
   shortName: string;
   rpc: string[];
-  wsRpc?: string[];
   nativeToken: string;
   nativeTokenSymbol: string;
   wrappedNative: string;
   blockExplorer: string;
-  aavePool: string;
-  aavePoolConfigurator: string;
-  flashLoanFeeBps: number; // Aave V3: 5 bps = 0.05%
+  balancerVault: string;
   gasEstimateMultiplier: number;
   dexes: DexConfig[];
   tokens: Record<string, TokenConfig>;
@@ -27,8 +24,8 @@ export interface DexConfig {
   type: 'uniswap_v2' | 'uniswap_v3' | 'algebra' | 'curve';
   router: string;
   factory: string;
-  quoter?: string; // V3 only
-  feeTiers?: number[]; // V3 only
+  quoter?: string;
+  feeTiers?: number[];
 }
 
 export interface TokenConfig {
@@ -37,8 +34,9 @@ export interface TokenConfig {
   decimals: number;
 }
 
-// Aave V3 Pool address is the same across Polygon, Arbitrum, and Optimism
-const AAVE_V3_POOL = '0x794a61358D6845594F94dc1DB02A252b5b4814aD';
+// Balancer V2 Vault address is the same across Polygon, Arbitrum, and Optimism.
+// Zero flash loan fee.
+const BALANCER_V2_VAULT = '0xBA12222222228d8Ba445958a75a0704D566BF2C8';
 
 export const CHAINS: Record<string, ChainConfig> = {
   polygon: {
@@ -55,9 +53,7 @@ export const CHAINS: Record<string, ChainConfig> = {
     nativeTokenSymbol: 'MATIC',
     wrappedNative: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
     blockExplorer: 'https://polygonscan.com',
-    aavePool: AAVE_V3_POOL,
-    aavePoolConfigurator: '0x8145eddDf43F50276641b55bd3AD95944510021E',
-    flashLoanFeeBps: 5,
+    balancerVault: BALANCER_V2_VAULT,
     gasEstimateMultiplier: 1.3,
     dexes: [
       {
@@ -106,9 +102,7 @@ export const CHAINS: Record<string, ChainConfig> = {
     nativeTokenSymbol: 'ETH',
     wrappedNative: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
     blockExplorer: 'https://arbiscan.io',
-    aavePool: AAVE_V3_POOL,
-    aavePoolConfigurator: '0x8145eddDf43F50276641b55bd3AD95944510021E',
-    flashLoanFeeBps: 5,
+    balancerVault: BALANCER_V2_VAULT,
     gasEstimateMultiplier: 1.3,
     dexes: [
       {
@@ -156,9 +150,7 @@ export const CHAINS: Record<string, ChainConfig> = {
     nativeTokenSymbol: 'ETH',
     wrappedNative: '0x4200000000000000000000000000000000000006',
     blockExplorer: 'https://optimistic.etherscan.io',
-    aavePool: AAVE_V3_POOL,
-    aavePoolConfigurator: '0x8145eddDf43F50276641b55bd3AD95944510021E',
-    flashLoanFeeBps: 5,
+    balancerVault: BALANCER_V2_VAULT,
     gasEstimateMultiplier: 1.3,
     dexes: [
       {
@@ -172,14 +164,14 @@ export const CHAINS: Record<string, ChainConfig> = {
       {
         name: 'Velodrome',
         type: 'uniswap_v2',
-        router: '0xa062a7275dB4F3e5405F8C7F3a1dBf1B2cA2cA2c',
+        router: '0x9c12939390052919aF3155f41bF4160fD3666a6f',
         factory: '0x25c6E3a8b4c5d4e6f7a8b9c0d1e2f3a4b5c6d7e8',
       },
     ],
     tokens: {
       WETH: { address: '0x4200000000000000000000000000000000000006', symbol: 'WETH', decimals: 18 },
-      USDC: { address: '0x0b2C639c2E740676B1A3b4bE0c8A6e4d3a2B1c5D', symbol: 'USDC', decimals: 6 },
-      USDT: { address: '0x94b008aA00cb79c4B7D8C2C2e6F3a4B5c6D7e8F9', symbol: 'USDT', decimals: 6 },
+      USDC: { address: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', symbol: 'USDC', decimals: 6 },
+      USDT: { address: '0x94b008aA00579c1307b0ef2c499ad98a8ce58e58', symbol: 'USDT', decimals: 6 },
       DAI: { address: '0xDA10009c5d442b2D2634E4DB82BfA7e91B2f4c56', symbol: 'DAI', decimals: 18 },
       OP: { address: '0x4200000000000000000000000000000000000042', symbol: 'OP', decimals: 18 },
     },
@@ -232,11 +224,9 @@ export const V3_POOL_ABI = [
   'function token1() view returns (address)',
 ];
 
-// Aave V3 Pool ABI (flash loan relevant)
-export const AAVE_V3_POOL_ABI = [
-  'function flashLoanSimple(address receiver, address asset, uint256 amount, bytes params) external',
-  'function flashLoan(address receiverAddress, address[] assets, uint256[] amounts, bytes modes, address onBehalfOf, bytes params, uint16 referralCode) external',
-  'function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)',
+// Balancer V2 Vault ABI (flash loan relevant)
+export const BALANCER_VAULT_ABI = [
+  'function flashLoan(address recipient, address[] tokens, uint256[] amounts, bytes userData) external',
 ];
 
 // Common token pairs to scan for triangular arbitrage
@@ -248,6 +238,10 @@ export const TRIANGULAR_PATHS: Record<string, [string, string, string][]> = {
     ['WETH_ETH', 'USDC', 'DAI'],
     ['USDC', 'DAI', 'USDT'],
     ['WBTC', 'WETH_ETH', 'USDC'],
+    ['WETH_ETH', 'WMATIC', 'USDC'],
+    ['WETH_ETH', 'WMATIC', 'DAI'],
+    ['WETH_ETH', 'WBTC', 'USDC'],
+    ['WMATIC', 'DAI', 'USDT'],
   ],
   arbitrum: [
     ['WETH', 'USDC', 'DAI'],
@@ -256,6 +250,10 @@ export const TRIANGULAR_PATHS: Record<string, [string, string, string][]> = {
     ['WETH', 'WBTC', 'USDC'],
     ['USDC', 'DAI', 'USDT'],
     ['ARB', 'WETH', 'USDC'],
+    ['WETH', 'USDC', 'WBTC'],
+    ['ARB', 'USDC', 'WETH'],
+    ['WETH', 'DAI', 'USDT'],
+    ['WBTC', 'WETH', 'USDT'],
   ],
   optimism: [
     ['WETH', 'USDC', 'DAI'],
@@ -263,6 +261,9 @@ export const TRIANGULAR_PATHS: Record<string, [string, string, string][]> = {
     ['WETH', 'USDC', 'OP'],
     ['USDC', 'DAI', 'USDT'],
     ['OP', 'WETH', 'USDC'],
+    ['WETH', 'DAI', 'USDT'],
+    ['OP', 'USDC', 'DAI'],
+    ['WETH', 'USDC', 'WBTC'],
   ],
 };
 
@@ -275,6 +276,9 @@ export const TWO_DEX_PAIRS: Record<string, [string, string][]> = {
     ['USDC', 'USDT'],
     ['DAI', 'USDT'],
     ['WBTC', 'WETH_ETH'],
+    ['WETH_ETH', 'WMATIC'],
+    ['WETH_ETH', 'DAI'],
+    ['WETH_ETH', 'USDT'],
   ],
   arbitrum: [
     ['WETH', 'USDC'],
@@ -283,6 +287,9 @@ export const TWO_DEX_PAIRS: Record<string, [string, string][]> = {
     ['USDC', 'DAI'],
     ['USDC', 'USDT'],
     ['WETH', 'ARB'],
+    ['WBTC', 'WETH'],
+    ['ARB', 'USDC'],
+    ['WETH', 'WBTC'],
   ],
   optimism: [
     ['WETH', 'USDC'],
@@ -290,5 +297,31 @@ export const TWO_DEX_PAIRS: Record<string, [string, string][]> = {
     ['WETH', 'DAI'],
     ['USDC', 'DAI'],
     ['WETH', 'OP'],
+    ['OP', 'USDC'],
+    ['USDC', 'USDT'],
+  ],
+};
+
+// Multi-hop paths (4+ hops) for deeper arbitrage discovery
+export const MULTI_HOP_PATHS: Record<string, string[][]> = {
+  polygon: [
+    ['WMATIC', 'USDC', 'WETH_ETH', 'DAI', 'WMATIC'],
+    ['WETH_ETH', 'USDC', 'WMATIC', 'DAI', 'WETH_ETH'],
+    ['USDC', 'WMATIC', 'WETH_ETH', 'DAI', 'USDC'],
+    ['WMATIC', 'USDC', 'DAI', 'USDT', 'WMATIC'],
+    ['WETH_ETH', 'WMATIC', 'USDC', 'DAI', 'WETH_ETH'],
+  ],
+  arbitrum: [
+    ['WETH', 'USDC', 'ARB', 'USDT', 'WETH'],
+    ['WETH', 'USDC', 'DAI', 'USDT', 'WETH'],
+    ['ARB', 'WETH', 'USDC', 'DAI', 'ARB'],
+    ['USDC', 'WETH', 'ARB', 'USDT', 'USDC'],
+    ['WETH', 'WBTC', 'USDC', 'DAI', 'WETH'],
+  ],
+  optimism: [
+    ['WETH', 'USDC', 'OP', 'DAI', 'WETH'],
+    ['WETH', 'USDC', 'DAI', 'USDT', 'WETH'],
+    ['OP', 'WETH', 'USDC', 'DAI', 'OP'],
+    ['USDC', 'WETH', 'OP', 'DAI', 'USDC'],
   ],
 };

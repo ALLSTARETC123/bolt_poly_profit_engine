@@ -17,7 +17,7 @@ import {
   CHAINS, ChainConfig, DexConfig, TokenConfig,
   ERC20_ABI, V2_PAIR_ABI, V2_FACTORY_ABI,
   V3_QUOTER_ABI, V3_FACTORY_ABI, V3_POOL_ABI,
-  TRIANGULAR_PATHS, TWO_DEX_PAIRS,
+  TRIANGULAR_PATHS, TWO_DEX_PAIRS, MULTI_HOP_PATHS,
 } from './chains';
 
 export interface ArbitrageOpportunity {
@@ -308,8 +308,8 @@ async function scanTwoDexArb(
           const profit = aBack - flashAmount;
           const profitUsd = parseFloat(ethers.formatUnits(profit, stableToken.decimals));
           const flashAmountUsd = parseFloat(ethers.formatUnits(flashAmount, stableToken.decimals));
-          const gasCostUsd = estimateGasCost(chainKey);
-          const netProfit = profitUsd - gasCostUsd - (flashAmountUsd * 0.0005); // Aave 0.05% fee
+          const gasCostUsd = await fetchGasCostUsd(provider, chainKey);
+          const netProfit = profitUsd - gasCostUsd; // Balancer V2: 0% flash loan fee
           const margin = (netProfit / flashAmountUsd) * 100;
 
           if (netProfit > 0.01) {
@@ -401,9 +401,8 @@ async function scanTriangularArb(
       const profit = currentAmount - startAmount;
       const profitUsd = parseFloat(ethers.formatUnits(profit, tokenA.decimals));
       const flashAmountUsd = parseFloat(ethers.formatUnits(startAmount, tokenA.decimals));
-      const gasCostUsd = estimateGasCost(chainKey) * 1.5; // More complex route
-      const flashFee = flashAmountUsd * 0.0005;
-      const netProfit = profitUsd - gasCostUsd - flashFee;
+      const gasCostUsd = (await fetchGasCostUsd(provider, chainKey)) * 1.5; // More complex route
+      const netProfit = profitUsd - gasCostUsd; // Balancer V2: 0% flash loan fee
       const margin = (netProfit / flashAmountUsd) * 100;
 
       if (netProfit > 0.01) {
@@ -504,9 +503,8 @@ async function scanPoolImbalance(
               if (aBack > flashAmountWei) {
                 const profit = aBack - flashAmountWei;
                 const profitUsd = parseFloat(ethers.formatUnits(profit, tokenA.decimals));
-                const gasCostUsd = estimateGasCost(chainKey);
-                const flashFee = flashAmount * 0.0005;
-                const netProfit = profitUsd - gasCostUsd - flashFee;
+                const gasCostUsd = await fetchGasCostUsd(provider, chainKey);
+                const netProfit = profitUsd - gasCostUsd; // Balancer V2: 0% flash loan fee
                 const margin = (netProfit / flashAmount) * 100;
 
                 if (netProfit > 0.01) {
@@ -543,16 +541,141 @@ async function scanPoolImbalance(
   return opportunities;
 }
 
-// Estimate gas cost in USD for a chain
-function estimateGasCost(chainKey: string): number {
-  const gasUnits = 350000; // Estimated gas for flash loan execution
-  const estimates: Record<string, { gwei: number; nativePriceUsd: number }> = {
-    polygon: { gwei: 30, nativePriceUsd: 0.5 },
-    arbitrum: { gwei: 0.1, nativePriceUsd: 2500 },
-    optimism: { gwei: 0.001, nativePriceUsd: 2500 },
-  };
-  const est = estimates[chainKey] || estimates.polygon;
-  return (gasUnits * est.gwei * 1e-9) * est.nativePriceUsd;
+// Fetch real gas cost in USD for a chain using live fee data and DEX spot price
+async function fetchGasCostUsd(provider: ethers.JsonRpcProvider, chainKey: string): Promise<number> {
+  try {
+    const chain = CHAINS[chainKey];
+    const gasUnits = 350000n; // Estimated gas for flash loan execution
+    const feeData = await provider.getFeeData();
+    const gasPrice = feeData.gasPrice || ethers.parseUnits('30', 'gwei');
+    const gasCostWei = gasUnits * gasPrice;
+
+    // Get native token price from DEX (wrapped native / USDC pair)
+    const wrappedNative = chain.tokens.WETH || chain.tokens.WMATIC;
+    const usdc = chain.tokens.USDC;
+    if (!wrappedNative || !usdc) return 0.01;
+
+    const nativePriceUsd = await getNativeTokenPriceUsd(provider, chain, wrappedNative, usdc);
+    const gasCostEth = parseFloat(ethers.formatEther(gasCostWei));
+    return gasCostEth * nativePriceUsd;
+  } catch {
+    return 0.01; // Fallback
+  }
+}
+
+// Get native token USD price from DEX spot price
+async function getNativeTokenPriceUsd(
+  provider: ethers.JsonRpcProvider,
+  chain: ChainConfig,
+  wrappedNative: TokenConfig,
+  usdc: TokenConfig
+): Promise<number> {
+  try {
+    // Try V2 pools first
+    for (const dex of chain.dexes) {
+      if (dex.type === 'uniswap_v2' || dex.type === 'algebra') {
+        const result = await getV2Reserves(provider, dex.factory, wrappedNative.address, usdc.address);
+        if (result && result.reserves[0] > 0n && result.reserves[1] > 0n) {
+          const wnativeReserve = parseFloat(ethers.formatUnits(result.reserves[0], wrappedNative.decimals));
+          const usdcReserve = parseFloat(ethers.formatUnits(result.reserves[1], usdc.decimals));
+          if (wnativeReserve > 0) return usdcReserve / wnativeReserve;
+        }
+      }
+    }
+    // Try V3
+    for (const dex of chain.dexes) {
+      if (dex.type === 'uniswap_v3' && dex.quoter && dex.feeTiers) {
+        for (const fee of dex.feeTiers) {
+          const quote = await getV3Quote(provider, dex.quoter, wrappedNative.address, usdc.address, ethers.parseUnits('1', wrappedNative.decimals), fee);
+          if (quote && quote.amountOut > 0n) {
+            return parseFloat(ethers.formatUnits(quote.amountOut, usdc.decimals));
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+// Scan for multi-hop arbitrage (4+ hops: A -> B -> C -> D -> A)
+async function scanMultiHopArb(
+  provider: ethers.JsonRpcProvider,
+  chain: ChainConfig,
+  chainKey: string,
+  blockNumber: number
+): Promise<ArbitrageOpportunity[]> {
+  const opportunities: ArbitrageOpportunity[] = [];
+  const paths = MULTI_HOP_PATHS[chainKey] || [];
+
+  for (const path of paths) {
+    if (path.length < 4) continue;
+
+    const tokens = path.map(k => chain.tokens[k]).filter(Boolean) as TokenConfig[];
+    if (tokens.length !== path.length) continue;
+
+    const startToken = tokens[0];
+    const startAmount = ethers.parseUnits('1000', startToken.decimals);
+    let currentAmount = startAmount;
+    let currentToken = startToken;
+    const dexPath: string[] = [];
+    const poolAddresses: string[] = [];
+    let profitable = true;
+
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const nextToken = tokens[i + 1];
+      const step = await getBestPrice(provider, chain, currentToken, nextToken, currentAmount);
+      if (!step || step.amountOut <= 0n) { profitable = false; break; }
+      dexPath.push(step.dexName);
+      poolAddresses.push(step.poolAddress);
+      currentAmount = step.amountOut;
+      currentToken = nextToken;
+    }
+
+    // Final hop back to start token
+    if (profitable) {
+      const finalStep = await getBestPrice(provider, chain, currentToken, startToken, currentAmount);
+      if (!finalStep || finalStep.amountOut <= 0n) { profitable = false; }
+      else {
+        dexPath.push(finalStep.dexName);
+        poolAddresses.push(finalStep.poolAddress);
+        currentAmount = finalStep.amountOut;
+      }
+    }
+
+    if (profitable && currentAmount > startAmount) {
+      const profit = currentAmount - startAmount;
+      const profitUsd = parseFloat(ethers.formatUnits(profit, startToken.decimals));
+      const flashAmountUsd = parseFloat(ethers.formatUnits(startAmount, startToken.decimals));
+      const gasCostUsd = (await fetchGasCostUsd(provider, chainKey)) * 2; // More hops = more gas
+      const netProfit = profitUsd - gasCostUsd; // Balancer V2: 0% flash loan fee
+      const margin = (netProfit / flashAmountUsd) * 100;
+
+      if (netProfit > 0.01) {
+        opportunities.push({
+          chain: chainKey,
+          opportunityType: 'multi_hop',
+          tokenPath: [...path, path[0]],
+          tokenAddresses: tokens.map(t => t.address),
+          dexPath,
+          poolAddresses,
+          flashLoanAsset: startToken.address,
+          flashLoanAmount: flashAmountUsd,
+          estimatedProfit: profitUsd,
+          estimatedGasCost: gasCostUsd,
+          netProfit,
+          profitMarginPct: margin,
+          poolReserves: {},
+          priceImpact: 0,
+          confidenceScore: Math.min(0.85, 0.55 + (margin / 12)),
+          blockNumber,
+        });
+      }
+    }
+  }
+
+  return opportunities;
 }
 
 // Main scan function — scans a single chain for all opportunity types
@@ -573,14 +696,15 @@ export async function scanChain(chainKey: string): Promise<ScanResult> {
   const allOpportunities: ArbitrageOpportunity[] = [];
 
   try {
-    // Scan all three types in parallel
-    const [twoDex, triangular, imbalance] = await Promise.all([
+    // Scan all four types in parallel
+    const [twoDex, triangular, imbalance, multiHop] = await Promise.all([
       scanTwoDexArb(provider, chain, chainKey, blockNumber),
       scanTriangularArb(provider, chain, chainKey, blockNumber),
       scanPoolImbalance(provider, chain, chainKey, blockNumber),
+      scanMultiHopArb(provider, chain, chainKey, blockNumber),
     ]);
 
-    allOpportunities.push(...twoDex, ...triangular, ...imbalance);
+    allOpportunities.push(...twoDex, ...triangular, ...imbalance, ...multiHop);
 
     // Sort by net profit descending
     allOpportunities.sort((a, b) => b.netProfit - a.netProfit);
