@@ -19,55 +19,24 @@ export interface WalletState {
   signer: ethers.Wallet | null;
 }
 
-// Encrypt a private key with a password
-async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
-  // Generate a random salt
-  const saltBytes = ethers.randomBytes(16);
-  const salt = ethers.hexlify(saltBytes);
-
-  // Derive an encryption key from the password + salt
-  const encKey = await deriveKey(password, saltBytes);
-
-  // Encrypt the private key
-  const encrypted = await cryptoEncrypt(privateKey, encKey);
-
-  return { encrypted, salt };
-}
-
-// Decrypt a private key with a password
-export async function decryptPrivateKey(encrypted: string, salt: string, password: string): Promise<string | null> {
-  try {
-    const saltBytes = ethers.getBytes(salt);
-    const encKey = await deriveKey(password, saltBytes);
-    return await cryptoDecrypt(encrypted, encKey);
-  } catch {
-    return null;
-  }
-}
-
 async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
-    'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+    'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'],
   );
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
     keyMaterial,
     { name: 'AES-GCM', length: 256 },
     false,
-    ['encrypt', 'decrypt']
+    ['encrypt', 'decrypt'],
   );
 }
 
 async function cryptoEncrypt(plaintext: string, key: CryptoKey): Promise<string> {
   const enc = new TextEncoder();
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    enc.encode(plaintext)
-  );
-  // Combine iv + ciphertext
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
   const combined = new Uint8Array(iv.length + ciphertext.byteLength);
   combined.set(iv);
   combined.set(new Uint8Array(ciphertext), iv.length);
@@ -79,20 +48,32 @@ async function cryptoDecrypt(ciphertextHex: string, key: CryptoKey): Promise<str
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
   const dec = new TextDecoder();
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    ciphertext
-  );
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
   return dec.decode(plaintext);
 }
 
-// Generate a new wallet
+async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
+  const saltBytes = ethers.randomBytes(16);
+  const salt = ethers.hexlify(saltBytes);
+  const encKey = await deriveKey(password, saltBytes);
+  const encrypted = await cryptoEncrypt(privateKey, encKey);
+  return { encrypted, salt };
+}
+
+export async function decryptPrivateKey(encrypted: string, salt: string, password: string): Promise<string | null> {
+  try {
+    const saltBytes = ethers.getBytes(salt);
+    const encKey = await deriveKey(password, saltBytes);
+    return await cryptoDecrypt(encrypted, encKey);
+  } catch {
+    return null;
+  }
+}
+
 export async function generateWallet(password: string): Promise<WalletState> {
   const wallet = ethers.Wallet.createRandom();
   const { encrypted, salt } = await encryptPrivateKey(wallet.privateKey, password);
 
-  // Store in Supabase
   const { error } = await supabase.from('arb_wallet').insert({
     address: wallet.address,
     encrypted_private_key: encrypted,
@@ -112,7 +93,6 @@ export async function generateWallet(password: string): Promise<WalletState> {
   };
 }
 
-// Import an existing wallet from private key
 export async function importWallet(privateKey: string, password: string): Promise<WalletState> {
   const wallet = new ethers.Wallet(privateKey);
   const { encrypted, salt } = await encryptPrivateKey(privateKey, password);
@@ -136,7 +116,6 @@ export async function importWallet(privateKey: string, password: string): Promis
   };
 }
 
-// Unlock wallet with password
 export async function unlockWallet(encryptedKey: string, salt: string, password: string): Promise<WalletState> {
   const privateKey = await decryptPrivateKey(encryptedKey, salt, password);
   if (!privateKey) throw new Error('Invalid password');
@@ -151,11 +130,10 @@ export async function unlockWallet(encryptedKey: string, salt: string, password:
   };
 }
 
-// Load wallet from Supabase (without unlocking)
 export async function loadWallet(): Promise<{ address: string; encryptedKey: string; salt: string } | null> {
   const { data, error } = await supabase
     .from('arb_wallet')
-    .select('address, encrypted_private_key, salt, chain_balances, deployed_contracts')
+    .select('address, encrypted_private_key, salt, deployed_contracts')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -169,13 +147,11 @@ export async function loadWallet(): Promise<{ address: string; encryptedKey: str
   };
 }
 
-// Get a connected signer for a specific chain
 export function getSignerForChain(wallet: ethers.Wallet, rpcUrl: string): ethers.Wallet {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   return wallet.connect(provider);
 }
 
-// Fetch native token balance for a wallet on a chain
 export async function getNativeBalance(address: string, rpcUrl: string): Promise<string> {
   try {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
@@ -186,27 +162,21 @@ export async function getNativeBalance(address: string, rpcUrl: string): Promise
   }
 }
 
-// Fetch ERC20 token balance
-export async function getTokenBalance(walletAddress: string, tokenAddress: string, rpcUrl: string): Promise<string> {
-  try {
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const contract = new ethers.Contract(tokenAddress, ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)'], provider);
-    const [balance, decimals] = await Promise.all([
-      contract.balanceOf(walletAddress),
-      contract.decimals(),
-    ]);
-    return ethers.formatUnits(balance, decimals);
-  } catch {
-    return '0.0';
-  }
-}
-
-// Update wallet balances in Supabase
 export async function updateWalletBalances(address: string, balances: Record<string, string>): Promise<void> {
   await supabase.from('arb_wallet').update({ chain_balances: balances }).eq('address', address);
 }
 
-// Update deployed contracts
 export async function updateDeployedContracts(address: string, contracts: Record<string, string>): Promise<void> {
   await supabase.from('arb_wallet').update({ deployed_contracts: contracts }).eq('address', address);
+}
+
+export async function getDeployedContracts(): Promise<Record<string, string> | null> {
+  const { data } = await supabase
+    .from('arb_wallet')
+    .select('deployed_contracts')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return data?.deployed_contracts || null;
 }

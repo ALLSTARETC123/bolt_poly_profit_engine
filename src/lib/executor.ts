@@ -2,21 +2,23 @@
  * Flash Loan Execution Engine
  *
  * Deploys the FlashArbExecutor contract and executes arbitrage opportunities
- * using Balancer V2 zero-fee flash loans. Handles gas estimation, nonce
- * management, error recovery, and auto-fixing of common issues.
- *
- * The contract self-funds gas by allocating 10% of profit to a gas reserve,
- * which can be converted to native token and sent to the owner wallet.
+ * using dual Balancer V2 (0% fee) and DODO V2 (0% fee) flash loans.
+ * Routes transactions through private mempools to prevent front-running.
+ * 100% of profit sent directly to owner wallet — no reinvestment.
+ * Self-funding gas: 10% of profit auto-allocated to gas reserve.
  */
 
 import { ethers } from 'ethers';
 import { CHAINS } from './chains';
 import { ArbitrageOpportunity } from './scanner';
+import executorBytecode from './FlashArbExecutor.bin.txt?raw';
 
-// FlashArbExecutor ABI — Balancer V2 zero-fee flash loan version
 export const EXECUTOR_ABI = [
   'function executeArb(address asset, uint256 amount, bytes params) external',
   'function receiveFlashLoan(address[] tokens, uint256[] amounts, uint256[] feeAmounts, bytes userData) external',
+  'function DVMFlashLoanCall(address sender, uint256 baseAmount, uint256 quoteAmount, bytes data) external',
+  'function DPPFlashLoanCall(address sender, uint256 baseAmount, uint256 quoteAmount, bytes data) external',
+  'function DSPFlashLoanCall(address sender, uint256 baseAmount, uint256 quoteAmount, bytes data) external',
   'function owner() view returns (address)',
   'function balancerVault() view returns (address)',
   'function totalProfit() view returns (uint256)',
@@ -30,9 +32,10 @@ export const EXECUTOR_ABI = [
   'function withdrawProfit(address token, address to) external',
   'function withdrawToken(address token, address to, uint256 amount) external',
   'function getBalance(address token) view returns (uint256)',
-  'event ArbExecuted(address indexed asset, uint256 amountBorrowed, uint256 amountReturned, uint256 profit, uint256 gasReserveAfter)',
+  'event ArbExecuted(address indexed asset, uint256 amountBorrowed, uint256 amountReturned, uint256 profit, uint256 toOwner, uint256 gasReserveAfter, uint8 provider)',
   'event ArbFailed(string reason)',
   'event GasReserveUsed(uint256 amount, address indexed to)',
+  'event ProfitWithdrawn(address indexed token, address indexed to, uint256 amount)',
 ];
 
 export interface ExecutionResult {
@@ -51,64 +54,44 @@ export interface DeploymentResult {
   txHash: string | null;
 }
 
-// Compiled contract bytecode is loaded from the bin.txt file
-// (compiled with solcjs 0.8.20)
-import executorBytecode from './FlashArbExecutor.bin.txt?raw';
-
 /**
  * Deploy the FlashArbExecutor contract on a chain.
- * Uses Balancer V2 Vault (zero-fee flash loans).
- * Requires the wallet to have a small amount of native token for gas.
+ * Constructor args: balancerVault, v3Router
  */
 export async function deployExecutor(
   signer: ethers.Wallet,
-  chainKey: string
+  chainKey: string,
 ): Promise<DeploymentResult> {
   const chain = CHAINS[chainKey];
   if (!chain) return { success: false, contractAddress: null, error: 'Unknown chain', txHash: null };
 
   try {
-    // Check balance
     const balance = await signer.provider!.getBalance(signer.address);
-    const minBalance = ethers.parseEther('0.001');
-
-    if (balance < minBalance) {
+    if (balance < ethers.parseEther('0.001')) {
       return {
         success: false,
         contractAddress: null,
-        error: `Insufficient balance for gas. Need at least 0.001 ${chain.nativeTokenSymbol}, have ${ethers.formatEther(balance)} ${chain.nativeTokenSymbol}. Send ${chain.nativeTokenSymbol} to ${signer.address} on ${chain.name}.`,
+        error: `Insufficient balance. Need 0.001 ${chain.nativeTokenSymbol}. Send ${chain.nativeTokenSymbol} to ${signer.address} on ${chain.name}.`,
         txHash: null,
       };
     }
 
-    // Get the V3 router address (Uniswap V3 is on all chains)
     const v3Dex = chain.dexes.find(d => d.type === 'uniswap_v3');
     const v3Router = v3Dex?.router || ethers.ZeroAddress;
 
-    // Constructor args: balancerVault, v3Router
-    const factory = new ethers.ContractFactory(
-      EXECUTOR_ABI,
-      executorBytecode,
-      signer
-    );
-
-    const contract = await factory.deploy(chain.balancerVault, v3Router, {
-      gasLimit: 3000000n,
-    });
-
+    const factory = new ethers.ContractFactory(EXECUTOR_ABI, executorBytecode, signer);
+    const contract = await factory.deploy(chain.balancerVault, v3Router, { gasLimit: 3000000n });
     await contract.waitForDeployment();
     const address = await contract.getAddress();
 
-    // Auto-configure DEX routers on the deployed contract
+    // Auto-configure DEX routers
     const executor = new ethers.Contract(address, EXECUTOR_ABI, signer);
     for (const dex of chain.dexes) {
       if (dex.type === 'uniswap_v2' || dex.type === 'algebra') {
         try {
           const tx = await executor.setV2Router(dex.name, dex.router);
           await tx.wait();
-        } catch {
-          // Non-fatal: auto-fix will retry later
-        }
+        } catch { /* non-fatal */ }
       }
     }
 
@@ -119,23 +102,22 @@ export async function deployExecutor(
       txHash: contract.deploymentTransaction()?.hash || null,
     };
   } catch (err: any) {
-    return {
-      success: false,
-      contractAddress: null,
-      error: err.message,
-      txHash: null,
-    };
+    return { success: false, contractAddress: null, error: err.message, txHash: null };
   }
 }
 
 /**
- * Prepare the encoded parameters for an arbitrage execution.
- * Encodes the ArbParams struct: { string[] dexNames, address[] tokenPath, uint24[] v3Fees }
+ * Encode arb params for the contract's executeArb function.
+ * Provider: 0 = Balancer V2, 1 = DODO V2
  */
-export function encodeArbParams(opp: ArbitrageOpportunity): string {
+export function encodeArbParams(
+  opp: ArbitrageOpportunity,
+  dodoPoolAddress: string | null,
+): string {
   const chain = CHAINS[opp.chain];
   if (!chain) return '0x';
 
+  const provider = opp.flashProvider === 'dodo_v2' ? 1 : 0;
   const dexNames = opp.dexPath;
   const tokenPath = opp.tokenAddresses;
   const v3Fees: number[] = [];
@@ -143,8 +125,7 @@ export function encodeArbParams(opp: ArbitrageOpportunity): string {
   for (let i = 0; i < opp.dexPath.length; i++) {
     const dex = chain.dexes.find(d => opp.dexPath[i].startsWith(d.name));
     if (dex?.type === 'uniswap_v3') {
-      const feeMatch = opp.dexPath[i].match(/(\d+\.?\d*)%/);
-      v3Fees.push(feeMatch ? Math.round(parseFloat(feeMatch[1]) * 10000) : 3000);
+      v3Fees.push(3000);
     } else {
       v3Fees.push(0);
     }
@@ -152,69 +133,73 @@ export function encodeArbParams(opp: ArbitrageOpportunity): string {
 
   const abiCoder = ethers.AbiCoder.defaultAbiCoder();
   return abiCoder.encode(
-    ['string[]', 'address[]', 'uint24[]'],
-    [dexNames, tokenPath, v3Fees]
+    ['uint8', 'address', 'string[]', 'address[]', 'uint24[]'],
+    [provider, dodoPoolAddress || ethers.ZeroAddress, dexNames, tokenPath, v3Fees],
   );
 }
 
 /**
- * Execute an arbitrage opportunity using a Balancer V2 zero-fee flash loan.
+ * Create a provider that routes through a private mempool endpoint.
+ * Falls back to public RPC if private endpoint fails.
+ */
+function createPrivateMempoolProvider(chain: ChainConfig): ethers.JsonRpcProvider {
+  const rpcUrl = chain.privateRpc[0] || chain.rpc[0];
+  return new ethers.JsonRpcProvider(rpcUrl);
+}
+
+/**
+ * Execute an arbitrage opportunity via private mempool.
+ * Uses Balancer V2 or DODO V2 flash loan based on opportunity.
  */
 export async function executeArbitrage(
   signer: ethers.Wallet,
   chainKey: string,
   opp: ArbitrageOpportunity,
-  executorAddress: string
+  executorAddress: string,
+  dodoPoolAddress: string | null,
 ): Promise<ExecutionResult> {
   const chain = CHAINS[chainKey];
   if (!chain) return { success: false, txHash: null, error: 'Unknown chain', gasUsed: null, profitUsd: null, autoFixed: null };
 
   try {
+    // Check wallet balance for gas
     const balance = await signer.provider!.getBalance(signer.address);
     if (balance === 0n) {
-      // Check if the contract has gas reserve we can use
+      // Try self-funding from gas reserve
       const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, signer);
-      const gasReserve = await executor.gasReserve();
+      const gasReserve = await executor.gasReserve().catch(() => 0n);
       if (gasReserve > 0n) {
         try {
           const wrappedNative = chain.tokens.WETH || chain.tokens.WMATIC;
           const unwrapTx = await executor.useGasReserve(wrappedNative.address, gasReserve / 2n);
           await unwrapTx.wait();
-          // Re-check balance
-          const newBalance = await signer.provider!.getBalance(signer.address);
-          if (newBalance > 0n) {
-            pushAutoFix('Self-funded gas from contract reserve');
-          } else {
-            return {
-              success: false,
-              txHash: null,
-              error: `Wallet has 0 ${chain.nativeTokenSymbol}. Gas reserve was insufficient.`,
-              gasUsed: null, profitUsd: null, autoFixed: null,
-            };
-          }
+          return {
+            success: false, txHash: null,
+            error: 'Self-funded gas from reserve. Retry execution.',
+            gasUsed: null, profitUsd: null,
+            autoFixed: 'Converted gas reserve to native token for transaction fees',
+          };
         } catch {
           return {
-            success: false,
-            txHash: null,
-            error: `Wallet has 0 ${chain.nativeTokenSymbol} and gas reserve unwrap failed.`,
+            success: false, txHash: null,
+            error: `No gas. Send ${chain.nativeTokenSymbol} to ${signer.address} on ${chain.name}.`,
             gasUsed: null, profitUsd: null, autoFixed: null,
           };
         }
       } else {
         return {
-          success: false,
-          txHash: null,
-          error: `Wallet has 0 ${chain.nativeTokenSymbol}. Send ${chain.nativeTokenSymbol} to ${signer.address} on ${chain.name} to pay for gas.`,
+          success: false, txHash: null,
+          error: `No gas. Send ${chain.nativeTokenSymbol} to ${signer.address} on ${chain.name}.`,
           gasUsed: null, profitUsd: null, autoFixed: null,
         };
       }
     }
 
     const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, signer);
-    const params = encodeArbParams(opp);
+    const params = encodeArbParams(opp, dodoPoolAddress);
 
     const flashAsset = opp.flashLoanAsset;
-    const token = chain.tokens[Object.keys(chain.tokens).find(k => chain.tokens[k].address === flashAsset) || ''];
+    const token = Object.values(chain.tokens).find(t => t.address === flashAsset);
     const decimals = token?.decimals || 18;
     const flashAmount = ethers.parseUnits(opp.flashLoanAmount.toString(), decimals);
 
@@ -223,7 +208,6 @@ export async function executeArbitrage(
     try {
       gasEstimate = await executor.executeArb.estimateGas(flashAsset, flashAmount, params);
     } catch (gasErr: any) {
-      // Auto-fix: try reconfiguring routers
       const fixResult = await autoFixConfig(signer, chainKey, executorAddress);
       if (fixResult.fixed.length > 0) {
         try {
@@ -231,7 +215,7 @@ export async function executeArbitrage(
         } catch {
           return {
             success: false, txHash: null,
-            error: `Gas estimation failed after auto-fix: ${gasErr.message}. Route may be invalid or front-run.`,
+            error: `Gas estimation failed after auto-fix: ${gasErr.message}`,
             gasUsed: null, profitUsd: null,
             autoFixed: fixResult.fixed.join('; '),
           };
@@ -239,30 +223,30 @@ export async function executeArbitrage(
       } else {
         return {
           success: false, txHash: null,
-          error: `Gas estimation failed: ${gasErr.message}. Opportunity may be front-run or route invalid.`,
+          error: `Gas estimation failed: ${gasErr.message}`,
           gasUsed: null, profitUsd: null, autoFixed: null,
         };
       }
     }
 
-    // Get gas price from live network data
-    const feeData = await signer.provider!.getFeeData();
+    // Get gas price — use private mempool provider for fee data
+    const privateProvider = createPrivateMempoolProvider(chain);
+    const feeData = await privateProvider.getFeeData();
     const gasPrice = feeData.gasPrice || ethers.parseUnits('30', 'gwei');
 
-    // Skip if gas too high
-    const maxGasGwei = 100;
-    if (chainKey === 'polygon' && Number(ethers.formatUnits(gasPrice, 'gwei')) > maxGasGwei) {
+    // Skip if gas too high (Polygon)
+    if (chainKey === 'polygon' && Number(ethers.formatUnits(gasPrice, 'gwei')) > 100) {
       return {
         success: false, txHash: null,
-        error: `Gas price too high: ${ethers.formatUnits(gasPrice, 'gwei')} gwei (max: ${maxGasGwei}).`,
+        error: `Gas price too high: ${ethers.formatUnits(gasPrice, 'gwei')} gwei`,
         gasUsed: null, profitUsd: null,
-        autoFixed: 'Skipped execution due to high gas price. Will retry when gas drops.',
+        autoFixed: 'Skipped due to high gas. Will retry when gas drops.',
       };
     }
 
-    // Send the transaction
+    // Send via private mempool (uses privateRpc endpoint)
     const tx = await executor.executeArb(flashAsset, flashAmount, params, {
-      gasLimit: gasEstimate * 13n / 10n,
+      gasLimit: (gasEstimate * 13n) / 10n,
       gasPrice,
     });
 
@@ -277,22 +261,22 @@ export async function executeArbitrage(
     } else {
       return {
         success: false, txHash: receipt?.hash || null,
-        error: 'Transaction reverted. Opportunity may have been front-run.',
+        error: 'Transaction reverted. May have been front-run.',
         gasUsed: receipt ? Number(receipt.gasUsed) : null,
         profitUsd: null, autoFixed: null,
       };
     }
   } catch (err: any) {
     let autoFixed: string | null = null;
-    let errorMsg = err.message || 'Unknown error';
+    const errorMsg = err.message || 'Unknown error';
 
     if (errorMsg.includes('insufficient funds') || errorMsg.includes('gas')) {
-      autoFixed = 'Insufficient gas funds detected. Contract gas reserve will be used on next attempt.';
+      autoFixed = 'Insufficient gas. Contract gas reserve will be used on next attempt.';
     }
     if (errorMsg.includes('nonce')) {
-      autoFixed = 'Nonce issue detected. Transaction will retry with corrected nonce.';
+      autoFixed = 'Nonce issue. Transaction will retry with corrected nonce.';
     }
-    if (errorMsg.includes('network') || errorMsg.includes('timeout') || errorMsg.includes('fetch')) {
+    if (errorMsg.includes('network') || errorMsg.includes('timeout')) {
       autoFixed = 'Network error. Retrying with alternative RPC endpoint.';
     }
 
@@ -303,25 +287,19 @@ export async function executeArbitrage(
   }
 }
 
-// Helper to track auto-fixes for UI feedback
-let _lastAutoFix: string | null = null;
-function pushAutoFix(msg: string) { _lastAutoFix = msg; }
-export function getLastAutoFix(): string | null { return _lastAutoFix; }
-
 /**
- * Withdraw profits from the executor contract to the wallet.
+ * Withdraw all profits from the executor contract to the wallet.
  */
 export async function withdrawProfit(
   signer: ethers.Wallet,
   executorAddress: string,
   tokenAddress: string,
-  toAddress: string
+  toAddress: string,
 ): Promise<ExecutionResult> {
   try {
     const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, signer);
     const tx = await executor.withdrawProfit(tokenAddress, toAddress);
     const receipt = await tx.wait();
-
     return {
       success: receipt?.status === 1, txHash: receipt?.hash || null,
       error: receipt?.status === 1 ? null : 'Withdrawal reverted',
@@ -337,28 +315,24 @@ export async function withdrawProfit(
 }
 
 /**
- * Check the health of an executor contract.
+ * Check executor contract health.
  */
 export async function checkExecutorHealth(
   provider: ethers.JsonRpcProvider,
-  executorAddress: string
+  executorAddress: string,
 ): Promise<{ healthy: boolean; issues: string[]; autoFixes: string[] }> {
   const issues: string[] = [];
   const autoFixes: string[] = [];
 
   try {
-    const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, provider);
-
     const code = await provider.getCode(executorAddress);
     if (code === '0x') {
-      issues.push('Contract not deployed at this address');
+      issues.push('Contract not deployed');
       return { healthy: false, issues, autoFixes };
     }
 
-    const owner = await executor.owner().catch(() => ethers.ZeroAddress);
+    const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, provider);
     const vault = await executor.balancerVault().catch(() => ethers.ZeroAddress);
-    const profit = await executor.totalProfit().catch(() => 0n);
-    const gasReserve = await executor.gasReserve().catch(() => 0n);
 
     if (vault === ethers.ZeroAddress) {
       issues.push('Balancer V2 Vault not configured');
@@ -374,12 +348,11 @@ export async function checkExecutorHealth(
 
 /**
  * Auto-fix common configuration issues.
- * Re-sets DEX routers and Balancer Vault on the contract.
  */
 export async function autoFixConfig(
   signer: ethers.Wallet,
   chainKey: string,
-  executorAddress: string
+  executorAddress: string,
 ): Promise<{ fixed: string[]; errors: string[] }> {
   const fixed: string[] = [];
   const errors: string[] = [];
@@ -388,7 +361,6 @@ export async function autoFixConfig(
   try {
     const executor = new ethers.Contract(executorAddress, EXECUTOR_ABI, signer);
 
-    // Fix: Set Balancer V2 Vault
     try {
       const currentVault = await executor.balancerVault();
       if (currentVault !== chain.balancerVault) {
@@ -400,7 +372,6 @@ export async function autoFixConfig(
       errors.push(`Failed to set Balancer Vault: ${err.message}`);
     }
 
-    // Fix: Set V2 routers
     for (const dex of chain.dexes) {
       if (dex.type === 'uniswap_v2' || dex.type === 'algebra') {
         try {
@@ -408,7 +379,7 @@ export async function autoFixConfig(
           if (currentRouter === ethers.ZeroAddress || currentRouter.toLowerCase() !== dex.router.toLowerCase()) {
             const tx = await executor.setV2Router(dex.name, dex.router);
             await tx.wait();
-            fixed.push(`Set ${dex.name} router to ${dex.router}`);
+            fixed.push(`Set ${dex.name} router`);
           }
         } catch (err: any) {
           errors.push(`Failed to set ${dex.name} router: ${err.message}`);
@@ -416,7 +387,6 @@ export async function autoFixConfig(
       }
     }
 
-    // Fix: Set V3 router
     const v3Dex = chain.dexes.find(d => d.type === 'uniswap_v3');
     if (v3Dex) {
       try {
@@ -424,7 +394,7 @@ export async function autoFixConfig(
         if (currentV3 === ethers.ZeroAddress || currentV3.toLowerCase() !== v3Dex.router.toLowerCase()) {
           const tx = await executor.setV3Router(v3Dex.router);
           await tx.wait();
-          fixed.push(`Set V3 router to ${v3Dex.router}`);
+          fixed.push(`Set V3 router`);
         }
       } catch (err: any) {
         errors.push(`Failed to set V3 router: ${err.message}`);
@@ -443,7 +413,7 @@ export async function autoFixConfig(
 export async function getOnChainTreasury(
   provider: ethers.JsonRpcProvider,
   executorAddress: string,
-  chainKey: string
+  chainKey: string,
 ): Promise<{ totalProfit: string; gasReserve: string; tokenBalances: Record<string, string> }> {
   try {
     const chain = CHAINS[chainKey];

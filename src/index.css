@@ -1,15 +1,11 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-@keyframes slide-in {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-.animate-slide-in {
-  animation: slide-in 0.3s ease-out;
+body {
+  margin: 0;
+  background: #0a0e17;
+  color: #e2e8f0;
 }
-
-.scrollbar-hide::-webkit-scrollbar { display: none; }
-.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
