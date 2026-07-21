@@ -1,42 +1,24 @@
-/**
- * Arbitrage scanner — simultaneously scans multiple DEXes across all chains.
- * Uses Balancer V2 (0% fee) and DODO V2 (0% fee) flash loan cost models.
- */
-
 import { ethers } from 'ethers';
-import {
-  CHAINS, ChainConfig, TokenConfig,
-  V2_PAIR_ABI, V2_FACTORY_ABI, V3_QUOTER_ABI, DODO_FACTORY_ABI,
-  TRIANGULAR_PATHS, TWO_DEX_PAIRS, MULTI_HOP_PATHS,
-} from './chains';
+import { CHAINS, CHAIN_KEYS, ChainConfig, TokenConfig, V2_PAIR_ABI, V2_FACTORY_ABI, V3_QUOTER_ABI, DODO_FACTORY_ABI, TRIANGULAR_PATHS, TWO_DEX_PAIRS, MULTI_HOP_PATHS } from './chains';
 
 export type OpportunityType = 'two_dex' | 'triangular' | 'multi_hop';
 export type FlashProvider = 'balancer_v2' | 'dodo_v2';
 
 export interface ArbitrageOpportunity {
-  chain: string;
-  opportunityType: OpportunityType;
-  tokenPath: string[];
-  tokenAddresses: string[];
-  dexPath: string[];
-  poolAddresses: string[];
-  flashLoanAsset: string;
-  flashLoanAmount: number;
-  estimatedProfit: number;
-  estimatedGasCost: number;
-  netProfit: number;
-  profitMarginPct: number;
-  confidenceScore: number;
-  blockNumber: number;
+  chain: string; opportunityType: OpportunityType;
+  tokenPath: string[]; tokenAddresses: string[];
+  dexPath: string[]; poolAddresses: string[];
+  flashLoanAsset: string; flashLoanAmount: number;
+  estimatedProfit: number; estimatedGasCost: number;
+  netProfit: number; profitMarginPct: number;
+  confidenceScore: number; blockNumber: number;
   flashProvider: FlashProvider;
 }
 
 export interface ScanResult {
-  chain: string;
-  blockNumber: number;
+  chain: string; blockNumber: number;
   opportunities: ArbitrageOpportunity[];
-  scanTimeMs: number;
-  error: string | null;
+  scanTimeMs: number; error: string | null;
 }
 
 async function getV2Reserves(provider: ethers.JsonRpcProvider, factoryAddress: string, tokenA: string, tokenB: string) {
@@ -62,7 +44,6 @@ interface BestPriceResult { amountOut: bigint; dexName: string; poolAddress: str
 async function getBestPrice(provider: ethers.JsonRpcProvider, chain: ChainConfig, tokenIn: TokenConfig, tokenOut: TokenConfig, amountIn: bigint): Promise<BestPriceResult | null> {
   let best: BestPriceResult | null = null;
   const tasks: Promise<BestPriceResult | null>[] = [];
-
   for (const dex of chain.dexes) {
     if (dex.type === 'uniswap_v2' || dex.type === 'algebra') {
       tasks.push((async () => {
@@ -84,13 +65,8 @@ async function getBestPrice(provider: ethers.JsonRpcProvider, chain: ChainConfig
       }
     }
   }
-
   const results = await Promise.allSettled(tasks);
-  for (const result of results) {
-    if (result.status === 'fulfilled' && result.value) {
-      if (!best || result.value.amountOut > best.amountOut) best = result.value;
-    }
-  }
+  for (const result of results) { if (result.status === 'fulfilled' && result.value) { if (!best || result.value.amountOut > best.amountOut) best = result.value; } }
   return best;
 }
 
@@ -133,7 +109,6 @@ async function scanTwoDexArb(provider: ethers.JsonRpcProvider, chain: ChainConfi
   const opps: ArbitrageOpportunity[] = [];
   const flashAmountUsd = 5000;
   const pairs = TWO_DEX_PAIRS[chainKey] || [];
-
   const tasks = pairs.map(async ([symA, symB]) => {
     const tokenA = chain.tokens[symA]; const tokenB = chain.tokens[symB];
     if (!tokenA || !tokenB) return null;
@@ -166,7 +141,6 @@ async function scanTwoDexArb(provider: ethers.JsonRpcProvider, chain: ChainConfi
       blockNumber, flashProvider: (dodoPool ? 'dodo_v2' : 'balancer_v2') as FlashProvider,
     } satisfies ArbitrageOpportunity;
   });
-
   const results = await Promise.allSettled(tasks);
   for (const r of results) { if (r.status === 'fulfilled' && r.value) opps.push(r.value); }
   return opps;
@@ -176,7 +150,6 @@ async function scanTriangularArb(provider: ethers.JsonRpcProvider, chain: ChainC
   const opps: ArbitrageOpportunity[] = [];
   const flashAmountUsd = 5000;
   const paths = TRIANGULAR_PATHS[chainKey] || [];
-
   const tasks = paths.map(async ([symA, symB, symC]) => {
     const tokenA = chain.tokens[symA]; const tokenB = chain.tokens[symB]; const tokenC = chain.tokens[symC];
     if (!tokenA || !tokenB || !tokenC) return null;
@@ -205,7 +178,6 @@ async function scanTriangularArb(provider: ethers.JsonRpcProvider, chain: ChainC
       blockNumber, flashProvider: (dodoPool ? 'dodo_v2' : 'balancer_v2') as FlashProvider,
     } satisfies ArbitrageOpportunity;
   });
-
   const results = await Promise.allSettled(tasks);
   for (const r of results) { if (r.status === 'fulfilled' && r.value) opps.push(r.value); }
   return opps;
@@ -215,7 +187,6 @@ async function scanMultiHopArb(provider: ethers.JsonRpcProvider, chain: ChainCon
   const opps: ArbitrageOpportunity[] = [];
   const flashAmountUsd = 5000;
   const paths = MULTI_HOP_PATHS[chainKey] || [];
-
   const tasks = paths.map(async (path) => {
     if (path.length < 4) return null;
     const tokens = path.map(k => chain.tokens[k]).filter(Boolean) as TokenConfig[];
@@ -251,7 +222,6 @@ async function scanMultiHopArb(provider: ethers.JsonRpcProvider, chain: ChainCon
       blockNumber, flashProvider: (dodoPool ? 'dodo_v2' : 'balancer_v2') as FlashProvider,
     } satisfies ArbitrageOpportunity;
   });
-
   const results = await Promise.allSettled(tasks);
   for (const r of results) { if (r.status === 'fulfilled' && r.value) opps.push(r.value); }
   return opps;

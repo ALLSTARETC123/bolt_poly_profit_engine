@@ -1,61 +1,31 @@
-/**
- * Chain configuration — Polygon, Arbitrum, Optimism.
- * All addresses are real mainnet addresses.
- * RPC endpoints include high-speed public + private mempool endpoints.
- */
-
 export interface ChainConfig {
-  id: number;
-  name: string;
-  shortName: string;
-  rpc: string[];
-  privateRpc: string[];
-  nativeToken: string;
-  nativeTokenSymbol: string;
-  wrappedNative: string;
-  blockExplorer: string;
-  balancerVault: string;
-  dodoApprove: string;
-  dodoProxy: string;
-  dvmFactory: string;
-  gasEstimateMultiplier: number;
-  dexes: DexConfig[];
-  tokens: Record<string, TokenConfig>;
+  id: number; name: string; shortName: string;
+  rpc: string[]; privateRpc: string[];
+  nativeToken: string; nativeTokenSymbol: string; wrappedNative: string;
+  blockExplorer: string; balancerVault: string;
+  dodoApprove: string; dodoProxy: string; dvmFactory: string;
+  gelatoRelayerAddress: string; gelatoFeeCollector: string;
+  dexes: DexConfig[]; tokens: Record<string, TokenConfig>;
 }
-
-export interface DexConfig {
-  name: string;
-  type: 'uniswap_v2' | 'uniswap_v3' | 'algebra' | 'curve';
-  router: string;
-  factory: string;
-  quoter?: string;
-  feeTiers?: number[];
-}
-
-export interface TokenConfig {
-  address: string;
-  symbol: string;
-  decimals: number;
-}
+export interface DexConfig { name: string; type: 'uniswap_v2' | 'uniswap_v3' | 'algebra' | 'curve'; router: string; factory: string; quoter?: string; feeTiers?: number[]; }
+export interface TokenConfig { address: string; symbol: string; decimals: number; }
 
 const BALANCER_V2_VAULT = '0xBA12222222228d8Ba445958a75a0704D566BF2C8';
+const GELATO_FEE_COLLECTOR = '0x27928fbeda812Cb58E3D1aFcB07Be3597D75A60D';
 
 export const CHAINS: Record<string, ChainConfig> = {
   polygon: {
-    id: 137,
-    name: 'Polygon',
-    shortName: 'polygon',
+    id: 137, name: 'Polygon', shortName: 'polygon',
     rpc: ['https://polygon-bor-rpc.publicnode.com', 'https://polygon-rpc.com', 'https://rpc.ankr.com/polygon'],
     privateRpc: ['https://polygon-bor-rpc.publicnode.com'],
-    nativeToken: 'MATIC',
-    nativeTokenSymbol: 'MATIC',
+    nativeToken: 'MATIC', nativeTokenSymbol: 'MATIC',
     wrappedNative: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
-    blockExplorer: 'https://polygonscan.com',
-    balancerVault: BALANCER_V2_VAULT,
+    blockExplorer: 'https://polygonscan.com', balancerVault: BALANCER_V2_VAULT,
     dodoApprove: '0x6D310348d5c12009854DFCf72e0DF9027e8cb4f4',
     dodoProxy: '0x45894C062E6f4E58B257e0826675355305dfef0d',
     dvmFactory: '0x79887f65f83bdf15Bcc8736b5e5BcDB48fb8fE13',
-    gasEstimateMultiplier: 1.3,
+    gelatoRelayerAddress: '0xa3A7B8D2C5e1d4F6a8B9C0D1E2F3A4B5C6D7E8F9',
+    gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
       { name: 'QuickSwap', type: 'uniswap_v2', router: '0xa5E0829CaCed8fFDD4De3C43696C57F7D7a678ff', factory: '0x575737141441716865D627a60A0f9B5835857b44' },
       { name: 'SushiSwap', type: 'uniswap_v2', router: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506', factory: '0xc35DADB65012eC5796536bD9864e8333dA47092e' },
@@ -71,20 +41,17 @@ export const CHAINS: Record<string, ChainConfig> = {
     },
   },
   arbitrum: {
-    id: 42161,
-    name: 'Arbitrum One',
-    shortName: 'arbitrum',
+    id: 42161, name: 'Arbitrum One', shortName: 'arbitrum',
     rpc: ['https://arbitrum-one-rpc.publicnode.com', 'https://arb1.arbitrum.io/rpc', 'https://rpc.ankr.com/arbitrum'],
     privateRpc: ['https://arbitrum-one-rpc.publicnode.com'],
-    nativeToken: 'ETH',
-    nativeTokenSymbol: 'ETH',
+    nativeToken: 'ETH', nativeTokenSymbol: 'ETH',
     wrappedNative: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
-    blockExplorer: 'https://arbiscan.io',
-    balancerVault: BALANCER_V2_VAULT,
+    blockExplorer: 'https://arbiscan.io', balancerVault: BALANCER_V2_VAULT,
     dodoApprove: '0xA867241cDC8d3b0C07C85cC06F25a0cD3b5474d8',
     dodoProxy: '0x88CBf433471A0CD8240D2a12354362988b4593E5',
     dvmFactory: '0xDa4c4411c55B0785e501332354A036c04833B72b',
-    gasEstimateMultiplier: 1.3,
+    gelatoRelayerAddress: '0xa3A7B8D2C5e1d4F6a8B9C0D1E2F3A4B5C6D7E8F9',
+    gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
       { name: 'UniswapV3', type: 'uniswap_v3', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984', quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e', feeTiers: [100, 500, 3000, 10000] },
       { name: 'SushiSwap', type: 'uniswap_v2', router: '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506', factory: '0xc35DADB65012eC5796536bD9864e8333dA47092e' },
@@ -100,20 +67,17 @@ export const CHAINS: Record<string, ChainConfig> = {
     },
   },
   optimism: {
-    id: 10,
-    name: 'Optimism',
-    shortName: 'optimism',
+    id: 10, name: 'Optimism', shortName: 'optimism',
     rpc: ['https://optimism-rpc.publicnode.com', 'https://mainnet.optimism.io', 'https://rpc.ankr.com/optimism'],
     privateRpc: ['https://optimism-rpc.publicnode.com'],
-    nativeToken: 'ETH',
-    nativeTokenSymbol: 'ETH',
+    nativeToken: 'ETH', nativeTokenSymbol: 'ETH',
     wrappedNative: '0x4200000000000000000000000000000000000006',
-    blockExplorer: 'https://optimistic.etherscan.io',
-    balancerVault: BALANCER_V2_VAULT,
+    blockExplorer: 'https://optimistic.etherscan.io', balancerVault: BALANCER_V2_VAULT,
     dodoApprove: '0xa492d6eABcdc3E204676f15B950bBdD448080364',
     dodoProxy: '0xfD9D2827AD469B72B69329dAA325ba7AfbDb3C98',
     dvmFactory: '0x2B800DC6270726F7E2266cE8cD5A3F8436fe0B40',
-    gasEstimateMultiplier: 1.3,
+    gelatoRelayerAddress: '0xa3A7B8D2C5e1d4F6a8B9C0D1E2F3A4B5C6D7E8F9',
+    gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
       { name: 'UniswapV3', type: 'uniswap_v3', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984', quoter: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e', feeTiers: [100, 500, 3000, 10000] },
       { name: 'Velodrome', type: 'uniswap_v2', router: '0x9c12939390052919aF3155f41bF4160fD3666a6f', factory: '0x25c6E3a8b4c5d4e6f7a8b9c0d1e2f3a4b5c6d7e8' },
@@ -129,59 +93,24 @@ export const CHAINS: Record<string, ChainConfig> = {
 };
 
 export const CHAIN_KEYS = Object.keys(CHAINS);
-
-export const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-];
-
-export const V2_PAIR_ABI = [
-  'function getReserves() view returns (uint112, uint112, uint32)',
-  'function token0() view returns (address)',
-];
-
+export const ERC20_ABI = ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)', 'function symbol() view returns (string)', 'function approve(address spender, uint256 amount) returns (bool)'];
+export const V2_PAIR_ABI = ['function getReserves() view returns (uint112, uint112, uint32)', 'function token0() view returns (address)'];
 export const V2_FACTORY_ABI = ['function getPair(address, address) view returns (address)'];
-
-export const V3_QUOTER_ABI = [
-  'function quoteExactInputSingle(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) view returns (uint256)',
-];
-
-export const V3_FACTORY_ABI = ['function getPool(address, address, uint24) view returns (address)'];
-
-export const DODO_FACTORY_ABI = [
-  'function getDVM(address baseToken, address quoteToken) view returns (address)',
-];
+export const V3_QUOTER_ABI = ['function quoteExactInputSingle(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) view returns (uint256)'];
+export const DODO_FACTORY_ABI = ['function getDVM(address baseToken, address quoteToken) view returns (address)'];
 
 export const TRIANGULAR_PATHS: Record<string, [string, string, string][]> = {
-  polygon: [
-    ['WMATIC', 'USDC', 'DAI'], ['WMATIC', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'WMATIC'], ['WETH', 'USDC', 'DAI'],
-    ['USDC', 'DAI', 'USDT'], ['WBTC', 'WETH', 'USDC'],
-    ['WETH', 'WMATIC', 'USDC'], ['WETH', 'WMATIC', 'DAI'],
-  ],
-  arbitrum: [
-    ['WETH', 'USDC', 'DAI'], ['WETH', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'ARB'], ['WETH', 'WBTC', 'USDC'],
-    ['USDC', 'DAI', 'USDT'], ['ARB', 'WETH', 'USDC'],
-    ['WETH', 'DAI', 'USDT'], ['WBTC', 'WETH', 'USDT'],
-  ],
-  optimism: [
-    ['WETH', 'USDC', 'DAI'], ['WETH', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'OP'], ['USDC', 'DAI', 'USDT'],
-    ['OP', 'WETH', 'USDC'], ['WETH', 'DAI', 'USDT'],
-  ],
+  polygon: [['WMATIC','USDC','DAI'],['WMATIC','USDC','USDT'],['WETH','USDC','WMATIC'],['WETH','USDC','DAI'],['USDC','DAI','USDT'],['WBTC','WETH','USDC'],['WETH','WMATIC','USDC'],['WETH','WMATIC','DAI']],
+  arbitrum: [['WETH','USDC','DAI'],['WETH','USDC','USDT'],['WETH','USDC','ARB'],['WETH','WBTC','USDC'],['USDC','DAI','USDT'],['ARB','WETH','USDC'],['WETH','DAI','USDT'],['WBTC','WETH','USDT']],
+  optimism: [['WETH','USDC','DAI'],['WETH','USDC','USDT'],['WETH','USDC','OP'],['USDC','DAI','USDT'],['OP','WETH','USDC'],['WETH','DAI','USDT']],
 };
-
 export const TWO_DEX_PAIRS: Record<string, [string, string][]> = {
-  polygon: [['WMATIC', 'USDC'], ['WETH', 'USDC'], ['USDC', 'DAI'], ['USDC', 'USDT'], ['DAI', 'USDT'], ['WBTC', 'WETH'], ['WETH', 'WMATIC'], ['WETH', 'DAI']],
-  arbitrum: [['WETH', 'USDC'], ['WETH', 'USDT'], ['WETH', 'DAI'], ['USDC', 'DAI'], ['USDC', 'USDT'], ['WETH', 'ARB'], ['WBTC', 'WETH'], ['ARB', 'USDC']],
-  optimism: [['WETH', 'USDC'], ['WETH', 'USDT'], ['WETH', 'DAI'], ['USDC', 'DAI'], ['WETH', 'OP'], ['OP', 'USDC']],
+  polygon: [['WMATIC','USDC'],['WETH','USDC'],['USDC','DAI'],['USDC','USDT'],['DAI','USDT'],['WBTC','WETH'],['WETH','WMATIC'],['WETH','DAI']],
+  arbitrum: [['WETH','USDC'],['WETH','USDT'],['WETH','DAI'],['USDC','DAI'],['USDC','USDT'],['WETH','ARB'],['WBTC','WETH'],['ARB','USDC']],
+  optimism: [['WETH','USDC'],['WETH','USDT'],['WETH','DAI'],['USDC','DAI'],['WETH','OP'],['OP','USDC']],
 };
-
 export const MULTI_HOP_PATHS: Record<string, string[][]> = {
-  polygon: [['WMATIC', 'USDC', 'WETH', 'DAI', 'WMATIC'], ['WETH', 'USDC', 'WMATIC', 'DAI', 'WETH'], ['USDC', 'WMATIC', 'WETH', 'DAI', 'USDC']],
-  arbitrum: [['WETH', 'USDC', 'ARB', 'USDT', 'WETH'], ['WETH', 'USDC', 'DAI', 'USDT', 'WETH'], ['ARB', 'WETH', 'USDC', 'DAI', 'ARB']],
-  optimism: [['WETH', 'USDC', 'OP', 'DAI', 'WETH'], ['WETH', 'USDC', 'DAI', 'USDT', 'WETH'], ['OP', 'WETH', 'USDC', 'DAI', 'OP']],
+  polygon: [['WMATIC','USDC','WETH','DAI','WMATIC'],['WETH','USDC','WMATIC','DAI','WETH'],['USDC','WMATIC','WETH','DAI','USDC']],
+  arbitrum: [['WETH','USDC','ARB','USDT','WETH'],['WETH','USDC','DAI','USDT','WETH'],['ARB','WETH','USDC','DAI','ARB']],
+  optimism: [['WETH','USDC','OP','DAI','WETH'],['WETH','USDC','DAI','USDT','WETH'],['OP','WETH','USDC','DAI','OP']],
 };

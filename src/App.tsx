@@ -4,25 +4,18 @@ import { createClient } from '@supabase/supabase-js';
 import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, Zap, CheckCircle, AlertTriangle, Clock,
-  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles,
+  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS } from './lib/chains';
 import { scanAllChains, ArbitrageOpportunity, ScanResult } from './lib/scanner';
-import {
-  deployExecutorGasless, executeArbitrageGasless,
-  DeploymentResult, ExecutionResult,
-} from './lib/executor';
-import {
-  generateWallet, importWallet, unlockWallet, loadWallet,
-  getNativeBalance, updateDeployedContracts, WalletState,
-} from './lib/wallet';
+import { deployExecutorGasless, executeArbitrageGasless, DeploymentResult, ExecutionResult } from './lib/executor';
+import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, WalletState } from './lib/wallet';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'settings';
-
 interface Alert { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
 interface TreasuryEntry { id: string; type: string; amount_usd: number; chain: string | null; tx_hash: string | null; created_at: string; }
 
@@ -48,10 +41,10 @@ export default function App() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [scanCount, setScanCount] = useState(0);
   const [totalProfit, setTotalProfit] = useState(0);
-  const [treasuryEntries, setTreasuryEntries] = useState<TreasuryEntry[]>([]);
   const [executedCount, setExecutedCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
-  const [relayerHealthy, setRelayerHealthy] = useState<boolean | null>(null);
+  const [relayerMode, setRelayerMode] = useState<string | null>(null);
+  const [gasTankBalance, setGasTankBalance] = useState<string | null>(null);
 
   const scanIntervalRef = useRef<number | null>(null);
 
@@ -63,18 +56,14 @@ export default function App() {
     (async () => {
       const loaded = await loadWallet();
       setWalletLoaded(true);
-      if (loaded) {
-        setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
-      }
+      if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
+
       const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
-      if (treasuryData) {
-        setTreasuryEntries(treasuryData as TreasuryEntry[]);
-        setTotalProfit((treasuryData as TreasuryEntry[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0));
-      }
+      if (treasuryData) { setTotalProfit((treasuryData as TreasuryEntry[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0)); }
+
       const { data: walletData } = await supabase.from('arb_wallet').select('deployed_contracts').order('created_at', { ascending: false }).limit(1).maybeSingle();
       if (walletData?.deployed_contracts) setDeployedContracts(walletData.deployed_contracts);
 
-      // Check relayer health
       try {
         const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
           method: 'POST',
@@ -83,47 +72,38 @@ export default function App() {
         });
         if (resp.ok) {
           const health = await resp.json();
-          setRelayerHealthy(health.configured === true);
-        } else { setRelayerHealthy(false); }
-      } catch { setRelayerHealthy(false); }
+          setRelayerMode(health.mode);
+          if (health.balances) {
+            const total = Object.values(health.balances).reduce((s: number, b: unknown) => s + parseFloat(String(b)), 0);
+            if (total > 0) setGasTankBalance(total.toFixed(4));
+          }
+        }
+      } catch { setRelayerMode('unconfigured'); }
     })();
   }, []);
 
   const handleGenerateWallet = async () => {
     if (!password || password.length < 8) { pushAlert('error', 'Password must be at least 8 characters'); return; }
-    try {
-      const ws = await generateWallet(password);
-      setWallet(ws);
-      pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
-      setActiveTab('dashboard');
-    } catch (err: any) { pushAlert('error', err.message); }
+    try { const ws = await generateWallet(password); setWallet(ws); pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`); setActiveTab('dashboard'); }
+    catch (err: any) { pushAlert('error', err.message); }
   };
 
   const handleImportWallet = async () => {
     if (!importKey || !password || password.length < 8) { pushAlert('error', 'Enter private key and password (min 8 chars)'); return; }
-    try {
-      const ws = await importWallet(importKey, password);
-      setWallet(ws);
-      pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setShowImport(false); setImportKey(''); setActiveTab('dashboard');
-    } catch (err: any) { pushAlert('error', err.message); }
+    try { const ws = await importWallet(importKey, password); setWallet(ws); pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`); setShowImport(false); setImportKey(''); setActiveTab('dashboard'); }
+    catch (err: any) { pushAlert('error', err.message); }
   };
 
   const handleUnlock = async () => {
     if (!wallet || !password) return;
-    try {
-      const ws = await unlockWallet(wallet.encryptedKey, wallet.salt, password);
-      setWallet(ws);
-      pushAlert('success', 'Wallet unlocked');
-    } catch { pushAlert('error', 'Invalid password'); }
+    try { const ws = await unlockWallet(wallet.encryptedKey, wallet.salt, password); setWallet(ws); pushAlert('success', 'Wallet unlocked'); }
+    catch { pushAlert('error', 'Invalid password'); }
   };
 
   const handleOneClickStart = async () => {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
-    if (relayerHealthy === false) { pushAlert('warning', 'Relayer not configured — gasless mode unavailable. Set RELAYER_PRIVATE_KEY in Supabase secrets.'); }
-
     setDeploying(true);
-    pushAlert('info', 'Deploying executor contracts via gasless relayer...');
+    pushAlert('info', 'Deploying contracts via gasless relayer...');
 
     for (const chainKey of CHAIN_KEYS) {
       if (!deployedContracts[chainKey]) {
@@ -132,9 +112,9 @@ export default function App() {
           const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Contract deployed on ${CHAINS[chainKey].name} (gasless!)`);
+          pushAlert('success', `Contract deployed on ${CHAINS[chainKey].name} (${result.gasless ? 'zero gas' : 'relayer'})`);
         } else {
-          pushAlert('warning', `Deploy failed on ${CHAINS[chainKey].name}: ${result.error?.slice(0, 80)}`);
+          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name}: ${result.error?.slice(0, 80)}`);
         }
       }
     }
@@ -162,8 +142,8 @@ export default function App() {
 
     if (opps.length > 0) {
       supabase.from('arb_opportunities').insert(opps.map(opp => ({
-        chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath,
-        dex_path: opp.dexPath, flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
+        chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
+        flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
         estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
         net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
         confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
@@ -173,9 +153,7 @@ export default function App() {
 
     if (autoExecute && wallet?.signer) {
       const min = parseFloat(minProfit) || 0.10;
-      for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) {
-        await executeOpportunity(opp);
-      }
+      for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
     }
   };
 
@@ -183,22 +161,14 @@ export default function App() {
     if (!wallet?.signer) { pushAlert('error', 'Unlock wallet to execute'); return; }
     const executorAddress = deployedContracts[opp.chain];
     if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
-
     setExecuting(true);
-    pushAlert('info', `Executing arb on ${opp.chain} via gasless relayer...`);
-
-    const result: ExecutionResult = await executeArbitrageGasless(
-      wallet.signer!, opp.chain, opp, executorAddress, null,
-    );
-
+    pushAlert('info', `Executing arb on ${opp.chain} via gasless relay...`);
+    const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress, null);
     if (result.success) {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
-      pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (gasless!)`);
-      await supabase.from('arb_treasury').insert({
-        type: 'profit', amount_usd: result.profitUsd || 0, chain: opp.chain,
-        tx_hash: result.txHash, opportunity_type: opp.opportunityType,
-      });
+      pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (zero gas!)`);
+      await supabase.from('arb_treasury').insert({ type: 'profit', amount_usd: result.profitUsd || 0, chain: opp.chain, tx_hash: result.txHash, opportunity_type: opp.opportunityType });
     } else {
       setFailedCount(prev => prev + 1);
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
@@ -215,26 +185,20 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-500 to-cyan-600 flex items-center justify-center">
-              <Zap className="w-5 h-5 text-white" />
+              <Rocket className="w-5 h-5 text-white" />
             </div>
             <div>
               <h1 className="text-base font-bold text-white">Flash Arb Engine</h1>
               <p className="text-xs text-slate-500 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-emerald-400" /> Gasless · Balancer V2 + DODO V2 · Private Mempool
+                <Sparkles className="w-3 h-3 text-emerald-400" /> Zero Gas · Gelato Relay · Balancer V2 + DODO V2
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {relayerHealthy === true && (
+            {relayerMode && relayerMode !== 'unconfigured' && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-xs text-emerald-300">Relayer Online</span>
-              </div>
-            )}
-            {relayerHealthy === false && (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-950/50 border border-amber-800/50">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                <span className="text-xs text-amber-300">Relayer Offline</span>
+                <span className="text-xs text-emerald-300">{relayerMode === 'gelato' ? 'Gelato Gas Tank' : 'Direct Relay'}</span>
               </div>
             )}
             {wallet && (
@@ -297,13 +261,16 @@ export default function App() {
               <StatCard icon={<Activity />} label="Scans" value={String(scanCount)} color="blue" />
             </div>
 
-            {/* Gasless banner */}
             <div className="bg-gradient-to-r from-emerald-950/50 to-cyan-950/50 rounded-xl border border-emerald-800/30 p-4">
               <div className="flex items-center gap-3">
                 <Sparkles className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-emerald-300">Gasless Mode Active</p>
-                  <p className="text-xs text-slate-400">No native tokens needed. The relayer pays gas and gets reimbursed from arbitrage profits (5% fee + 10% gas reserve).</p>
+                  <p className="text-sm font-semibold text-emerald-300">Zero-Gas Launch Active</p>
+                  <p className="text-xs text-slate-400">
+                    No native tokens needed. Gelato Gas Tank pays gas from USDC.
+                    The first arbitrage profit funds all subsequent gas — zero upfront capital.
+                    {gasTankBalance && ` Gas Tank: ${gasTankBalance} ETH equivalent`}
+                  </p>
                 </div>
               </div>
             </div>
@@ -315,7 +282,7 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gasless" value={relayerHealthy ? 'ACTIVE' : 'PENDING'} color={relayerHealthy ? 'emerald' : 'amber'} />
+                <StatusItem label="Gas Mode" value={relayerMode === 'gelato' ? 'GELATO' : relayerMode === 'direct' ? 'RELAYER' : 'PENDING'} color={relayerMode === 'gelato' ? 'emerald' : 'amber'} />
                 <StatusItem label="Flash Provider" value="Balancer + DODO" color="emerald" />
               </div>
             </div>
@@ -354,9 +321,7 @@ export default function App() {
                 <TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities
               </h3>
               {allOpportunities.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">
-                  {engineRunning ? 'Scanning...' : 'Start the engine to scan for arbitrage opportunities'}
-                </p>
+                <p className="text-sm text-slate-500 text-center py-8">{engineRunning ? 'Scanning...' : 'Start the engine to scan for arbitrage opportunities'}</p>
               ) : (
                 <div className="space-y-2">
                   {allOpportunities.slice(0, 10).map((opp, i) => (
@@ -393,11 +358,10 @@ export default function App() {
               </h3>
               {!walletLoaded ? <p className="text-sm text-slate-500">Loading...</p> : !wallet ? (
                 <div className="space-y-4">
-                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. You never need native tokens — the relayer pays gas.</p>
+                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. You never need native tokens — Gelato pays all gas.</p>
                   <div className="space-y-3">
                     <div className="relative">
-                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
-                        placeholder="Password (min 8 chars)"
+                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)"
                         className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
                       <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
                         {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -418,8 +382,7 @@ export default function App() {
                 <div className="space-y-4">
                   <p className="text-sm text-slate-400">Wallet found: <span className="font-mono text-slate-300">{wallet.address}</span></p>
                   <div className="relative">
-                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
-                      placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && handleUnlock()}
+                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && handleUnlock()}
                       className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
                     <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -435,7 +398,7 @@ export default function App() {
                   </div>
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
                     <p className="text-xs text-emerald-300 flex items-center gap-1.5">
-                      <Sparkles className="w-3 h-3" /> Gasless mode — no native tokens needed for this wallet.
+                      <Sparkles className="w-3 h-3" /> Zero-gas mode — no native tokens needed. Gelato Gas Tank pays all gas from USDC.
                     </p>
                   </div>
                 </div>
@@ -448,9 +411,7 @@ export default function App() {
           <div className="space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4">All Opportunities ({allOpportunities.length})</h3>
-              {allOpportunities.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">No opportunities found. Start the engine to scan.</p>
-              ) : (
+              {allOpportunities.length === 0 ? <p className="text-sm text-slate-500 text-center py-8">No opportunities found. Start the engine to scan.</p> : (
                 <div className="space-y-2">
                   {allOpportunities.map((opp, i) => (
                     <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
@@ -483,31 +444,60 @@ export default function App() {
               </h3>
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-slate-300">Auto-Execute</p>
-                    <p className="text-xs text-slate-500">Automatically execute profitable opportunities</p>
-                  </div>
+                  <div><p className="text-sm font-medium text-slate-300">Auto-Execute</p><p className="text-xs text-slate-500">Automatically execute profitable opportunities</p></div>
                   <button onClick={() => setAutoExecute(!autoExecute)} className={`w-12 h-6 rounded-full transition-colors ${autoExecute ? 'bg-emerald-600' : 'bg-slate-700'}`}>
                     <div className={`w-5 h-5 rounded-full bg-white transition-transform ${autoExecute ? 'translate-x-6' : 'translate-x-0.5'}`} />
                   </button>
                 </div>
                 <div>
                   <label className="text-sm font-medium text-slate-300">Min Profit (USD)</label>
-                  <input type="text" value={minProfit} onChange={e => setMinProfit(e.target.value)}
-                    className="w-full px-3 py-2 mt-1 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white" />
+                  <input type="text" value={minProfit} onChange={e => setMinProfit(e.target.value)} className="w-full px-3 py-2 mt-1 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white" />
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-emerald-400" /> Gasless Relayer
+                <Sparkles className="w-4 h-4 text-emerald-400" /> Zero-Gas Architecture
               </h3>
-              <div className="space-y-2 text-sm text-slate-400">
-                <p>The relayer is a Supabase Edge Function that holds a small "gas tank" wallet. It deploys contracts and executes arbitrage on your behalf using your EIP-712 signature.</p>
-                <p>You never need native tokens. The relayer is reimbursed from arbitrage profits (5% fee + 10% gas reserve).</p>
+              <div className="space-y-3 text-sm text-slate-400">
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-slate-300">Gelato Gas Tank</p>
+                    <p className="text-xs">Deposit USDC once (any chain). Gelato pays gas on ALL chains. No native tokens needed by anyone.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-slate-300">Self-Funding from First Arb</p>
+                    <p className="text-xs">The first profitable arbitrage generates USDC. 10% auto-deposits to the Gas Tank, funding all future gas. Zero upfront capital.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-slate-300">Profit Distribution</p>
+                    <p className="text-xs">85% to your wallet · 5% to Gelato relay fee · 10% to Gas Tank reserve. No reinvestment, no lockup.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-slate-300">EIP-712 Gasless Signing</p>
+                    <p className="text-xs">You sign off-chain (free). Gelato relays the transaction. Your wallet never holds native tokens.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-slate-300">Private Mempool</p>
+                    <p className="text-xs">Gelato routes through private mempools, protecting against front-running and sandwich attacks.</p>
+                  </div>
+                </div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Status: {relayerHealthy === true ? <span className="text-emerald-400">Online</span> : relayerHealthy === false ? <span className="text-amber-400">Offline — set RELAYER_PRIVATE_KEY in Supabase secrets</span> : <span className="text-slate-400">Checking...</span>}</p>
+                  <p className="text-xs text-slate-500">Relayer Status: {relayerMode === 'gelato' ? <span className="text-emerald-400">Gelato Gas Tank Active</span> : relayerMode === 'direct' ? <span className="text-cyan-400">Direct Relay (relayer wallet pays gas)</span> : relayerMode === 'unconfigured' ? <span className="text-amber-400">Unconfigured — set GELATO_API_KEY or RELAYER_PRIVATE_KEY</span> : <span className="text-slate-400">Checking...</span>}</p>
                 </div>
               </div>
             </div>
@@ -528,11 +518,33 @@ export default function App() {
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas
+                <Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas Cycle
               </h3>
               <div className="space-y-2 text-sm text-slate-400">
-                <p>10% of arbitrage profits are auto-allocated to a gas reserve within the contract. 5% goes to the relayer for gas reimbursement.</p>
-                <p>85% of profits go directly to your wallet — no reinvestment, no lockup.</p>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span>
+                  <span>Scanner finds profitable arbitrage opportunity</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span>
+                  <span>User signs EIP-712 message (free, off-chain)</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span>
+                  <span>Gelato relays transaction, pays gas from Gas Tank</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span>
+                  <span>Flash loan executes, profit generated in USDC</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span>
+                  <span>85% to wallet · 5% pays Gelato fee · 10% replenishes Gas Tank</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="w-5 h-5 rounded-full bg-cyan-600 flex items-center justify-center text-white">↻</span>
+                  <span className="text-cyan-300">Gas Tank now has USDC — next arb is fully self-funded</span>
+                </div>
               </div>
             </div>
 
@@ -548,7 +560,7 @@ export default function App() {
                     <div key={chainKey} className="flex items-center gap-3 bg-slate-800/50 rounded-lg px-3 py-2">
                       <span className="text-sm font-medium w-24">{chain.name}</span>
                       {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) :
-                        (<><span className="text-xs text-slate-500 flex-1">Auto-deploys on Start (gasless)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
+                        (<><span className="text-xs text-slate-500 flex-1">Auto-deploys on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
                     </div>
                   );
                 })}
