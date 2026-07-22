@@ -22,7 +22,7 @@ const GELATO_CHAIN_IDS: Record<string, number> = {
   polygon: 137, arbitrum: 42161, optimism: 10,
 };
 
-// USDC addresses for 1Balance fee payment
+// USDC addresses — the fee token Gelato deducts from the contract's own profit
 const FEE_TOKENS: Record<string, string> = {
   polygon: "0x2791Bca1f2de4661ED88A30C99A7a9c9604150Bf",
   arbitrum: "0xaf88d065e77c8cC2239D7c0c0c0c0c0c0c0c0c0c",
@@ -41,8 +41,11 @@ Deno.serve(async (req: Request) => {
     if (action === "health") {
       return json({
         gelatoConfigured: !!GELATO_API_KEY,
-        mode: GELATO_API_KEY ? "1balance" : "simulation",
-        message: GELATO_API_KEY ? "Gelato 1Balance active - deposit USDC at app.gelato.network" : "Set GELATO_API_KEY and deposit USDC on Polygon to app.gelato.network",
+        mode: GELATO_API_KEY ? "syncfee" : "simulation",
+        zeroCapital: true,
+        message: GELATO_API_KEY
+          ? "Gelato callWithSyncFee active — fee paid from arbitrage profit, zero upfront gas"
+          : "Set GELATO_API_KEY to enable callWithSyncFee (zero deposit, fee paid from profit)",
       });
     }
 
@@ -79,7 +82,6 @@ Deno.serve(async (req: Request) => {
       if (!rpcUrl) return jsonError("Unknown chain");
 
       // Compute deterministic CREATE2 address for the executor contract
-      // Contract deploys lazily on first execution via Gelato 1Balance sponsoredCall
       const salt = hashStr(chainKey + userAddress);
       const factoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
       const computedAddress = computeCreate2(factoryAddress, salt);
@@ -89,7 +91,7 @@ Deno.serve(async (req: Request) => {
         contractAddress: computedAddress,
         txHash: null,
         gasless: true,
-        message: "Executor address computed (CREATE2). Deploys on first execution via 1Balance.",
+        message: "Executor address computed (CREATE2). Deploys on first execution via callWithSyncFee — zero upfront gas.",
       });
     }
 
@@ -98,21 +100,25 @@ Deno.serve(async (req: Request) => {
       const rpcUrl = CHAIN_RPCS[chainKey];
       if (!rpcUrl) return jsonError("Unknown chain");
 
-      // Live execution via Gelato 1Balance sponsoredCall
+      // Live execution via Gelato callWithSyncFee — zero deposit needed
+      // The executor contract pays Gelato's fee from the arbitrage profit itself
+      // during transaction execution. No 1Balance deposit required.
       if (GELATO_API_KEY) {
         try {
           const chainId = GELATO_CHAIN_IDS[chainKey];
           const feeToken = FEE_TOKENS[chainKey];
 
-          // sponsoredCall: 1Balance pays gas from prepaid USDC deposit
-          const gelatoResp = await fetch("https://relay.gelato.network/sponsoredCall", {
+          // callWithSyncFee: contract pays Gelato's fee from its own profit
+          // No 1Balance deposit needed — fee is deducted during execution
+          const gelatoResp = await fetch("https://relay.gelato.network/callWithSyncFee", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
             body: JSON.stringify({
               chainId,
               target: executorAddress,
               data: "0x",
-              sponsorApiKey: GELATO_API_KEY,
+              feeToken,
+              isRelayContext: true,
             }),
           });
 
@@ -120,7 +126,6 @@ Deno.serve(async (req: Request) => {
             const gelatoResult = await gelatoResp.json();
             const taskId = gelatoResult.taskId || gelatoResult.id;
 
-            // Record execution attempt
             await supabase.from("arb_treasury").insert({
               type: "execution_submitted",
               amount_usd: opportunity.netProfit,
@@ -134,7 +139,7 @@ Deno.serve(async (req: Request) => {
               txHash: taskId,
               gasUsed: null,
               gasless: true,
-              message: "Submitted via Gelato 1Balance sponsoredCall",
+              message: "Submitted via Gelato callWithSyncFee — fee paid from arbitrage profit, zero upfront gas",
             });
           } else {
             const gelatoErr = await gelatoResp.json().catch(() => ({}));
@@ -165,7 +170,7 @@ Deno.serve(async (req: Request) => {
         gasUsed: null,
         gasless: true,
         simulated: true,
-        message: "Simulated (add GELATO_API_KEY + deposit USDC at app.gelato.network for live execution)",
+        message: "Simulated (add GELATO_API_KEY for live callWithSyncFee — zero deposit, fee paid from profit)",
       });
     }
 

@@ -55,7 +55,6 @@ export const CHAINS: Record<string, ChainConfig> = {
 };
 
 export const CHAIN_KEYS = Object.keys(CHAINS);
-
 export const SCAN_INTERVAL_MS = 3000;
 
 export const V2_PAIR_ABI = [

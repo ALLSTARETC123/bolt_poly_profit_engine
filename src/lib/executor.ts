@@ -54,6 +54,7 @@ export async function executeArbitrageGasless(
         chain: opp.chain, tokenPath: opp.tokenPath, tokenAddresses: opp.tokenAddresses,
         dexPath: opp.dexPath, flashLoanAsset: opp.flashLoanAsset,
         flashLoanAmount: opp.flashLoanAmount, netProfit: opp.netProfit,
+        opportunityType: opp.opportunityType,
       },
       userAddress: userWallet.address,
     });

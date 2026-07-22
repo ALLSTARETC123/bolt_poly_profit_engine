@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, CheckCircle, AlertTriangle, Clock,
-  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket,
+  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket, Zap,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
 import { scanAllChains, ArbitrageOpportunity, ScanResult } from './lib/scanner';
@@ -210,15 +210,15 @@ export default function App() {
             <div>
               <h1 className="text-base font-bold text-white">Flash Arb Engine</h1>
               <p className="text-xs text-slate-500 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-emerald-400" /> Zero Gas · 1Balance · {SCAN_INTERVAL_MS / 1000}s Scan
+                <Zap className="w-3 h-3 text-emerald-400" /> Zero Capital · SyncFee · {SCAN_INTERVAL_MS / 1000}s Scan
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             {relayerMode && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === '1balance' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
-                <span className="text-xs text-emerald-300">{relayerMode === '1balance' ? '1Balance Live' : 'Simulation'}</span>
+                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'syncfee' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
+                <span className="text-xs text-emerald-300">{relayerMode === 'syncfee' ? 'SyncFee Live' : 'Simulation'}</span>
               </div>
             )}
             {wallet && (
@@ -276,10 +276,10 @@ export default function App() {
 
             <div className="bg-gradient-to-r from-emerald-950/50 to-cyan-950/50 rounded-xl border border-emerald-800/30 p-4">
               <div className="flex items-center gap-3">
-                <Sparkles className="w-5 h-5 text-emerald-400 flex-shrink-0" />
+                <Zap className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-emerald-300">Zero-Gas Architecture · {SCAN_INTERVAL_MS / 1000}s Block-Aware Scanning</p>
-                  <p className="text-xs text-slate-400">Scans every {SCAN_INTERVAL_MS}ms to match block times (Polygon ~2s, Arbitrum ~0.25s, Optimism ~2s). Gelato 1Balance pays gas from prepaid USDC deposit.</p>
+                  <p className="text-sm font-semibold text-emerald-300">100% Zero-Capital Architecture · SyncFee Mode</p>
+                  <p className="text-xs text-slate-400">Balancer 0% flash loans + Gelato callWithSyncFee (fee paid from profit, no deposit). Scans every {SCAN_INTERVAL_MS}ms. Zero upfront gas, zero seed capital.</p>
                 </div>
               </div>
             </div>
@@ -289,7 +289,7 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gas Mode" value={relayerMode === '1balance' ? '1BALANCE' : 'SIMULATION'} color={relayerMode === '1balance' ? 'emerald' : 'amber'} />
+                <StatusItem label="Gas Mode" value={relayerMode === 'syncfee' ? 'SYNCFEE' : 'SIMULATION'} color={relayerMode === 'syncfee' ? 'emerald' : 'amber'} />
                 <StatusItem label="Scan Rate" value={`${SCAN_INTERVAL_MS / 1000}s`} color="cyan" />
               </div>
             </div>
@@ -387,7 +387,7 @@ export default function App() {
                     </div>
                   )}
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
-                    <p className="text-xs text-emerald-300 flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Zero-gas mode active. No native tokens needed.</p>
+                    <p className="text-xs text-emerald-300 flex items-center gap-1.5"><Zap className="w-3 h-3" /> Zero-capital mode active. No gas tokens needed — SyncFee pays from profit.</p>
                   </div>
                 </div>
               )}
@@ -441,26 +441,28 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-400" /> Gelato 1Balance Setup</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Zap className="w-4 h-4 text-emerald-400" /> Zero-Capital Launch Path</h3>
               <div className="space-y-3 text-sm text-slate-400">
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 1: Create 1Balance Account</p><p className="text-xs">Go to app.gelato.network and sign up for a free account</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 2: Deposit USDC on Polygon</p><p className="text-xs">Send $5-10 USDC to your 1Balance deposit address on Polygon. This covers gas on ALL chains.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 3: Get Your API Key</p><p className="text-xs">Copy your sponsor API key from the 1Balance dashboard</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 4: Add API Key to Edge Function</p><p className="text-xs">Set GELATO_API_KEY as a Supabase edge function secret. The app switches from simulation to live execution automatically.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 1: Create Gelato Account (Free)</p><p className="text-xs">Go to app.gelato.network, sign up. No credit card, no deposit.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 2: Get Your API Key (Free)</p><p className="text-xs">Navigate to Relay, create an app, copy your sponsor API key. No payment needed for callWithSyncFee mode.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 3: Add API Key to Supabase</p><p className="text-xs">Set GELATO_API_KEY as an edge function secret. App switches from simulation to live SyncFee execution.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 4: Start Engine</p><p className="text-xs">Scanner finds arb, Gelato relays it, fee is deducted from the profit itself. Zero upfront capital.</p></div></div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Current Status: {relayerMode === '1balance' ? <span className="text-emerald-400">1Balance Live — executing via sponsoredCall</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live</span>}</p>
+                  <p className="text-xs text-slate-500">Current Status: {relayerMode === 'syncfee' ? <span className="text-emerald-400">SyncFee Live — fee paid from profit, zero deposit</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live (free, no deposit)</span>}</p>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas Cycle</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Fuel className="w-4 h-4 text-amber-400" /> How callWithSyncFee Works (Zero Deposit)</h3>
               <div className="space-y-2 text-sm text-slate-400">
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span><span>Scanner finds profitable arbitrage opportunity</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>User signs EIP-712 message (free, off-chain)</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Gelato 1Balance relays transaction, pays gas from USDC deposit</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Flash loan executes, profit generated in USDC</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>85% to settlement wallet, 5% Gelato fee, 10% replenishes 1Balance</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>Gelato relays the transaction to the executor contract</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Contract takes Balancer 0% flash loan (no collateral)</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Arb executes, profit is generated in USDC</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>Contract pays Gelato's fee from the profit (callWithSyncFee)</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">6</span><span>Remaining profit goes to your settlement wallet</span></div>
+                <p className="text-xs text-emerald-300 mt-2 pl-7">No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.</p>
               </div>
             </div>
 
