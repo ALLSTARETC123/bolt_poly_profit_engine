@@ -1,14 +1,15 @@
 export interface TokenConfig { address: string; symbol: string; decimals: number; }
-export interface DexConfig { name: string; type: string; router: string; factory?: string; quoter?: string; }
+export interface DexConfig { name: string; type: string; router: string; factory?: string; }
 export interface ChainConfig {
   id: number; name: string; rpc: string[]; dexes: DexConfig[];
-  tokens: Record<string, TokenConfig>;
+  tokens: Record<string, TokenConfig>; blockTimeMs: number;
 }
 
 export const CHAINS: Record<string, ChainConfig> = {
   polygon: {
     id: 137, name: 'Polygon',
     rpc: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    blockTimeMs: 2000,
     dexes: [
       { name: 'QuickSwap', type: 'v2', router: '0xa5E0829CaCEd813cA8E0458745D5f8e75A8EaB22', factory: '0x575737141443441C6e51785CD7665248d39B8C42' },
       { name: 'SushiSwap', type: 'v2', router: '0x1b02dA8Cb0d097eB8D57A175b88c3D4991356312', factory: '0xc35DADB65012eC812c0F2c0a6B68cF7B6161F0A8' },
@@ -24,6 +25,7 @@ export const CHAINS: Record<string, ChainConfig> = {
   arbitrum: {
     id: 42161, name: 'Arbitrum',
     rpc: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'],
+    blockTimeMs: 250,
     dexes: [
       { name: 'SushiSwap', type: 'v2', router: '0x1b02dA8Cb0d097eB8D57A175b88c3D4991356312', factory: '0xc35DADB65012eC812c0F2c0a6B68cF7B6161F0A8' },
     ],
@@ -38,6 +40,7 @@ export const CHAINS: Record<string, ChainConfig> = {
   optimism: {
     id: 10, name: 'Optimism',
     rpc: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com'],
+    blockTimeMs: 2000,
     dexes: [
       { name: 'UniswapV3', type: 'v2', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', factory: '0x1F98431c8aD98523631AE4a59f267346ea31F984' },
     ],
@@ -52,6 +55,8 @@ export const CHAINS: Record<string, ChainConfig> = {
 };
 
 export const CHAIN_KEYS = Object.keys(CHAINS);
+
+export const SCAN_INTERVAL_MS = 3000;
 
 export const V2_PAIR_ABI = [
   'function getReserves() view returns (uint112, uint112, uint32)',

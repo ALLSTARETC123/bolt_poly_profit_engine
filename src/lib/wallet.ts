@@ -9,6 +9,7 @@ export interface WalletState {
   salt: string;
   isUnlocked: boolean;
   signer: ethers.Wallet | null;
+  settlementAddress: string | null;
 }
 
 async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
@@ -54,22 +55,44 @@ async function relay(action: string, payload: Record<string, unknown>): Promise<
 
 export async function generateWallet(password: string): Promise<WalletState> {
   const wallet = ethers.Wallet.createRandom();
+  const settlementWallet = ethers.Wallet.createRandom();
   const saltBytes = ethers.randomBytes(16);
   const salt = ethers.hexlify(saltBytes);
   const encKey = await deriveKey(password, saltBytes);
   const encrypted = await encrypt(wallet.privateKey, encKey);
-  await relay('db_insert', { table: 'arb_wallet', data: { address: wallet.address, encrypted_private_key: encrypted, salt, deployed_contracts: {} } });
-  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(wallet.privateKey) };
+  await relay('db_insert', {
+    table: 'arb_wallet',
+    data: {
+      address: wallet.address,
+      encrypted_private_key: encrypted,
+      salt,
+      deployed_contracts: {},
+      settlement_address: settlementWallet.address,
+      settlement_encrypted_key: await encrypt(settlementWallet.privateKey, encKey),
+    },
+  });
+  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(wallet.privateKey), settlementAddress: settlementWallet.address };
 }
 
 export async function importWallet(privateKey: string, password: string): Promise<WalletState> {
   const wallet = new ethers.Wallet(privateKey);
+  const settlementWallet = ethers.Wallet.createRandom();
   const saltBytes = ethers.randomBytes(16);
   const salt = ethers.hexlify(saltBytes);
   const encKey = await deriveKey(password, saltBytes);
   const encrypted = await encrypt(privateKey, encKey);
-  await relay('db_insert', { table: 'arb_wallet', data: { address: wallet.address, encrypted_private_key: encrypted, salt, deployed_contracts: {} } });
-  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(privateKey) };
+  await relay('db_insert', {
+    table: 'arb_wallet',
+    data: {
+      address: wallet.address,
+      encrypted_private_key: encrypted,
+      salt,
+      deployed_contracts: {},
+      settlement_address: settlementWallet.address,
+      settlement_encrypted_key: await encrypt(settlementWallet.privateKey, encKey),
+    },
+  });
+  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(privateKey), settlementAddress: settlementWallet.address };
 }
 
 export async function unlockWallet(encryptedKey: string, salt: string, password: string): Promise<WalletState> {
@@ -77,15 +100,20 @@ export async function unlockWallet(encryptedKey: string, salt: string, password:
   const encKey = await deriveKey(password, saltBytes);
   const privateKey = await decrypt(encryptedKey, encKey);
   const wallet = new ethers.Wallet(privateKey);
-  return { address: wallet.address, encryptedKey, salt, isUnlocked: true, signer: wallet };
+  let settlementAddress: string | null = null;
+  try {
+    const result = await relay('db_select', { table: 'arb_wallet', filter: { address: wallet.address }, limit: 1 });
+    if (result.data?.[0]?.settlement_address) settlementAddress = result.data[0].settlement_address;
+  } catch { /* non-fatal */ }
+  return { address: wallet.address, encryptedKey, salt, isUnlocked: true, signer: wallet, settlementAddress };
 }
 
-export async function loadWallet(): Promise<{ address: string; encryptedKey: string; salt: string } | null> {
+export async function loadWallet(): Promise<{ address: string; encryptedKey: string; salt: string; settlementAddress: string | null } | null> {
   try {
     const result = await relay('db_select', { table: 'arb_wallet', order: 'created_at.desc', limit: 1 });
     if (!result.data || result.data.length === 0) return null;
     const w = result.data[0];
-    return { address: w.address, encryptedKey: w.encrypted_private_key, salt: w.salt };
+    return { address: w.address, encryptedKey: w.encrypted_private_key, salt: w.salt, settlementAddress: w.settlement_address || null };
   } catch { return null; }
 }
 

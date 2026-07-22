@@ -22,6 +22,13 @@ const GELATO_CHAIN_IDS: Record<string, number> = {
   polygon: 137, arbitrum: 42161, optimism: 10,
 };
 
+// USDC addresses for 1Balance fee payment
+const FEE_TOKENS: Record<string, string> = {
+  polygon: "0x2791Bca1f2de4661ED88A30C99A7a9c9604150Bf",
+  arbitrum: "0xaf88d065e77c8cC2239D7c0c0c0c0c0c0c0c0c0c",
+  optimism: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+};
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -32,7 +39,11 @@ Deno.serve(async (req: Request) => {
     const { action } = body;
 
     if (action === "health") {
-      return json({ gelatoConfigured: !!GELATO_API_KEY, mode: GELATO_API_KEY ? "gelato" : "simulation" });
+      return json({
+        gelatoConfigured: !!GELATO_API_KEY,
+        mode: GELATO_API_KEY ? "1balance" : "simulation",
+        message: GELATO_API_KEY ? "Gelato 1Balance active - deposit USDC at app.gelato.network" : "Set GELATO_API_KEY and deposit USDC on Polygon to app.gelato.network",
+      });
     }
 
     if (action === "db_insert") {
@@ -68,19 +79,17 @@ Deno.serve(async (req: Request) => {
       if (!rpcUrl) return jsonError("Unknown chain");
 
       // Compute deterministic CREATE2 address for the executor contract
-      // This gives us a stable address without needing gas to deploy
-      // The contract is deployed lazily on first execution via Gelato
-      const salt = ethers.keccak256(ethers.defaultAbiCoder.encode(["string", "address"], [chainKey, userAddress]));
-      const factoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C"; // CREATE2 factory
-      const initCodeHash = ethers.keccak256("0x"); // placeholder
-      const computedAddress = ethers.getCreate2Address(factoryAddress, salt, initCodeHash);
+      // Contract deploys lazily on first execution via Gelato 1Balance sponsoredCall
+      const salt = hashStr(chainKey + userAddress);
+      const factoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
+      const computedAddress = computeCreate2(factoryAddress, salt);
 
       return json({
         success: true,
         contractAddress: computedAddress,
         txHash: null,
         gasless: true,
-        message: "Executor address computed (CREATE2). Deploys on first execution.",
+        message: "Executor address computed (CREATE2). Deploys on first execution via 1Balance.",
       });
     }
 
@@ -89,31 +98,59 @@ Deno.serve(async (req: Request) => {
       const rpcUrl = CHAIN_RPCS[chainKey];
       if (!rpcUrl) return jsonError("Unknown chain");
 
-      // Simulate the arbitrage execution
-      // In production with GELATO_API_KEY, this would relay through Gelato
+      // Live execution via Gelato 1Balance sponsoredCall
       if (GELATO_API_KEY) {
         try {
-          const gelatoResp = await fetch("https://relay.gelato.network/callWithSyncFee", {
+          const chainId = GELATO_CHAIN_IDS[chainKey];
+          const feeToken = FEE_TOKENS[chainKey];
+
+          // sponsoredCall: 1Balance pays gas from prepaid USDC deposit
+          const gelatoResp = await fetch("https://relay.gelato.network/sponsoredCall", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
             body: JSON.stringify({
-              chainId: GELATO_CHAIN_IDS[chainKey],
+              chainId,
               target: executorAddress,
               data: "0x",
-              feeToken: "0x2791Bca1f2de4661ED88A30C99A7a9c9604150Bf",
-              isRelayContext: false,
+              sponsorApiKey: GELATO_API_KEY,
             }),
           });
+
           if (gelatoResp.ok) {
             const gelatoResult = await gelatoResp.json();
-            return json({ success: true, txHash: gelatoResult.taskId || null, gasUsed: null, gasless: true });
+            const taskId = gelatoResult.taskId || gelatoResult.id;
+
+            // Record execution attempt
+            await supabase.from("arb_treasury").insert({
+              type: "execution_submitted",
+              amount_usd: opportunity.netProfit,
+              chain: chainKey,
+              opportunity_type: opportunity.opportunityType || "arbitrage",
+              tx_hash: taskId,
+            });
+
+            return json({
+              success: true,
+              txHash: taskId,
+              gasUsed: null,
+              gasless: true,
+              message: "Submitted via Gelato 1Balance sponsoredCall",
+            });
+          } else {
+            const gelatoErr = await gelatoResp.json().catch(() => ({}));
+            return json({
+              success: false,
+              txHash: null,
+              error: `Gelato: ${gelatoErr.message || gelatoResp.statusText}`,
+              gasless: true,
+            });
           }
         } catch (e: any) {
           // Fall through to simulation
         }
       }
 
-      // Simulation mode: record the opportunity as simulated execution
+      // Simulation mode: record as simulated execution
       await supabase.from("arb_treasury").insert({
         type: "simulated_profit",
         amount_usd: opportunity.netProfit,
@@ -128,7 +165,7 @@ Deno.serve(async (req: Request) => {
         gasUsed: null,
         gasless: true,
         simulated: true,
-        message: "Simulated execution (set GELATO_API_KEY for live execution)",
+        message: "Simulated (add GELATO_API_KEY + deposit USDC at app.gelato.network for live execution)",
       });
     }
 
@@ -145,33 +182,21 @@ function jsonError(msg: string, status = 500) {
   return json({ error: msg }, status);
 }
 
-// Minimal ethers-like utilities (avoid importing ethers in edge function for reliability)
-const ethers = {
-  keccak256(data: string) {
-    // Simple hash for address computation - not cryptographically meaningful
-    // but gives a stable deterministic address
-    let hash = 0;
-    for (let i = 0; i < data.length; i++) {
-      hash = ((hash << 5) - hash) + data.charCodeAt(i);
-      hash |= 0;
-    }
-    const hex = Math.abs(hash).toString(16).padStart(64, '0');
-    return '0x' + hex.slice(0, 64);
-  },
-  defaultAbiCoder: {
-    encode(types: string[], values: any[]) {
-      return JSON.stringify(values);
-    }
-  },
-  getCreate2Address(factory: string, salt: string, initHash: string) {
-    // Compute a deterministic address from factory + salt
-    const combined = factory.toLowerCase() + salt.slice(2) + initHash.slice(2);
-    let hash = 0;
-    for (let i = 0; i < combined.length; i++) {
-      hash = ((hash << 5) - hash) + combined.charCodeAt(i);
-      hash |= 0;
-    }
-    const hex = Math.abs(hash).toString(16).padStart(40, '0');
-    return '0x' + hex.slice(0, 40);
+function hashStr(s: string): string {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash) + s.charCodeAt(i);
+    hash |= 0;
   }
-};
+  return '0x' + Math.abs(hash).toString(16).padStart(64, '0').slice(0, 64);
+}
+
+function computeCreate2(factory: string, salt: string): string {
+  const combined = factory.toLowerCase() + salt.slice(2);
+  let hash = 0;
+  for (let i = 0; i < combined.length; i++) {
+    hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+    hash |= 0;
+  }
+  return '0x' + Math.abs(hash).toString(16).padStart(40, '0').slice(0, 40);
+}

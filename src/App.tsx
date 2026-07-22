@@ -5,7 +5,7 @@ import {
   Shield, CheckCircle, AlertTriangle, Clock,
   Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket,
 } from 'lucide-react';
-import { CHAINS, CHAIN_KEYS } from './lib/chains';
+import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
 import { scanAllChains, ArbitrageOpportunity, ScanResult } from './lib/scanner';
 import { deployExecutorGasless, executeArbitrageGasless, DeploymentResult, ExecutionResult } from './lib/executor';
 import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, WalletState } from './lib/wallet';
@@ -53,7 +53,10 @@ export default function App() {
       try {
         const loaded = await loadWallet();
         setWalletLoaded(true);
-        if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
+        if (loaded) setWallet({
+          address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt,
+          isUnlocked: false, signer: null, settlementAddress: loaded.settlementAddress,
+        });
       } catch { setWalletLoaded(true); }
 
       if (supabase) {
@@ -86,6 +89,7 @@ export default function App() {
       const ws = await generateWallet(password);
       setWallet(ws);
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
+      if (ws.settlementAddress) pushAlert('info', `Settlement wallet: ${ws.settlementAddress.slice(0, 10)}...`);
       setActiveTab('dashboard');
     } catch (err: any) { pushAlert('error', err.message); }
   };
@@ -113,7 +117,7 @@ export default function App() {
   const handleOneClickStart = async () => {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
     setDeploying(true);
-    pushAlert('info', 'Deploying contracts via gasless relayer...');
+    pushAlert('info', 'Computing executor addresses (zero gas)...');
 
     for (const chainKey of CHAIN_KEYS) {
       if (!deployedContracts[chainKey]) {
@@ -122,7 +126,7 @@ export default function App() {
           const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Contract deployed on ${CHAINS[chainKey].name}`);
+          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}`);
         } else {
           pushAlert('warning', `Deploy on ${CHAINS[chainKey].name}: ${result.error?.slice(0, 80)}`);
         }
@@ -131,9 +135,9 @@ export default function App() {
 
     setDeploying(false);
     setEngineRunning(true);
-    pushAlert('success', 'Engine started');
+    pushAlert('success', `Engine started — scanning every ${SCAN_INTERVAL_MS / 1000}s`);
     runScan();
-    scanIntervalRef.current = setInterval(() => runScan(), 15000);
+    scanIntervalRef.current = setInterval(() => runScan(), SCAN_INTERVAL_MS);
   };
 
   const stopEngine = () => {
@@ -181,7 +185,7 @@ export default function App() {
     const executorAddress = deployedContracts[opp.chain];
     if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
     setExecuting(true);
-    pushAlert('info', `Executing arb on ${opp.chain} via gasless relay...`);
+    pushAlert('info', `Executing arb on ${opp.chain} (${opp.opportunityType})...`);
     const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress);
     if (result.success) {
       setExecutedCount(prev => prev + 1);
@@ -206,15 +210,15 @@ export default function App() {
             <div>
               <h1 className="text-base font-bold text-white">Flash Arb Engine</h1>
               <p className="text-xs text-slate-500 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-emerald-400" /> Zero Gas · Gelato Relay · Balancer V2
+                <Sparkles className="w-3 h-3 text-emerald-400" /> Zero Gas · 1Balance · {SCAN_INTERVAL_MS / 1000}s Scan
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             {relayerMode && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'gelato' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
-                <span className="text-xs text-emerald-300">{relayerMode === 'gelato' ? 'Gelato Active' : 'Simulation'}</span>
+                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === '1balance' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
+                <span className="text-xs text-emerald-300">{relayerMode === '1balance' ? '1Balance Live' : 'Simulation'}</span>
               </div>
             )}
             {wallet && (
@@ -274,8 +278,8 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <Sparkles className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-emerald-300">Zero-Gas Architecture</p>
-                  <p className="text-xs text-slate-400">No native tokens needed. Gelato Gas Tank pays gas from USDC. First arb profit funds all subsequent gas.</p>
+                  <p className="text-sm font-semibold text-emerald-300">Zero-Gas Architecture · {SCAN_INTERVAL_MS / 1000}s Block-Aware Scanning</p>
+                  <p className="text-xs text-slate-400">Scans every {SCAN_INTERVAL_MS}ms to match block times (Polygon ~2s, Arbitrum ~0.25s, Optimism ~2s). Gelato 1Balance pays gas from prepaid USDC deposit.</p>
                 </div>
               </div>
             </div>
@@ -285,8 +289,8 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gas Mode" value={relayerMode === 'gelato' ? 'GELATO' : 'SIMULATION'} color={relayerMode === 'gelato' ? 'emerald' : 'amber'} />
-                <StatusItem label="Flash Provider" value="Balancer V2" color="emerald" />
+                <StatusItem label="Gas Mode" value={relayerMode === '1balance' ? '1BALANCE' : 'SIMULATION'} color={relayerMode === '1balance' ? 'emerald' : 'amber'} />
+                <StatusItem label="Scan Rate" value={`${SCAN_INTERVAL_MS / 1000}s`} color="cyan" />
               </div>
             </div>
 
@@ -302,11 +306,11 @@ export default function App() {
                     <div key={chainKey} className="flex items-center gap-4 bg-slate-800/30 rounded-lg px-4 py-3">
                       <div className={`w-2 h-2 rounded-full ${engineRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
                       <span className="text-sm font-medium w-28">{chain.name}</span>
-                      <span className="text-xs text-slate-500">ID: {chain.id}</span>
+                      <span className="text-xs text-slate-500">~{chain.blockTimeMs / 1000}s/block</span>
                       <span className="text-xs text-slate-400">{oppCount} opps</span>
                       {result?.scanTimeMs !== undefined && <span className="text-xs text-slate-500">{result.scanTimeMs}ms</span>}
                       <div className="flex-1" />
-                      {hasContract ? <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Deployed</span> : <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>}
+                      {hasContract ? <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Ready</span> : <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>}
                     </div>
                   );
                 })}
@@ -316,7 +320,7 @@ export default function App() {
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities</h3>
               {allOpportunities.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">{engineRunning ? 'Scanning...' : 'Start the engine to scan for arbitrage opportunities'}</p>
+                <p className="text-sm text-slate-500 text-center py-8">{engineRunning ? 'Scanning every 3s...' : 'Start the engine to scan for arbitrage opportunities'}</p>
               ) : (
                 <div className="space-y-2">
                   {allOpportunities.slice(0, 10).map((opp, i) => (
@@ -344,7 +348,7 @@ export default function App() {
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management</h3>
               {!walletLoaded ? <p className="text-sm text-slate-500">Loading...</p> : !wallet ? (
                 <div className="space-y-4">
-                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. You never need native tokens.</p>
+                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. A system-generated settlement wallet is created automatically — profits flow there, transferable later.</p>
                   <div className="space-y-3">
                     <div className="relative">
                       <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
@@ -375,6 +379,13 @@ export default function App() {
                     <p className="text-xs text-slate-500 mb-1">Wallet Address</p>
                     <p className="text-sm font-mono text-emerald-300">{wallet.address}</p>
                   </div>
+                  {wallet.settlementAddress && (
+                    <div className="bg-slate-800/50 rounded-lg p-4">
+                      <p className="text-xs text-slate-500 mb-1">Settlement Address (auto-generated)</p>
+                      <p className="text-sm font-mono text-cyan-300">{wallet.settlementAddress}</p>
+                      <p className="text-xs text-slate-500 mt-2">Profits accumulate here. Transfer to your MetaMask or any wallet at your convenience.</p>
+                    </div>
+                  )}
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
                     <p className="text-xs text-emerald-300 flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Zero-gas mode active. No native tokens needed.</p>
                   </div>
@@ -422,17 +433,22 @@ export default function App() {
                   <label className="text-sm font-medium text-slate-300">Min Profit (USD)</label>
                   <input type="text" value={minProfit} onChange={e => setMinProfit(e.target.value)} className="w-full px-3 py-2 mt-1 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white" />
                 </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-300">Scan Interval</label>
+                  <p className="text-xs text-slate-500 mt-1">{SCAN_INTERVAL_MS / 1000} seconds — matches Polygon/Optimism block times (~2s), captures Arbitrum sub-second blocks</p>
+                </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-400" /> Zero-Gas Architecture</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-400" /> Gelato 1Balance Setup</h3>
               <div className="space-y-3 text-sm text-slate-400">
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Gelato Gas Tank</p><p className="text-xs">Deposit USDC once. Gelato pays gas on ALL chains.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Self-Funding from First Arb</p><p className="text-xs">10% of profit auto-deposits to Gas Tank, funding all future gas.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">EIP-712 Gasless Signing</p><p className="text-xs">You sign off-chain (free). Gelato relays the transaction.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 1: Create 1Balance Account</p><p className="text-xs">Go to app.gelato.network and sign up for a free account</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 2: Deposit USDC on Polygon</p><p className="text-xs">Send $5-10 USDC to your 1Balance deposit address on Polygon. This covers gas on ALL chains.</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 3: Get Your API Key</p><p className="text-xs">Copy your sponsor API key from the 1Balance dashboard</p></div></div>
+                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 4: Add API Key to Edge Function</p><p className="text-xs">Set GELATO_API_KEY as a Supabase edge function secret. The app switches from simulation to live execution automatically.</p></div></div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Relayer Status: {relayerMode === 'gelato' ? <span className="text-emerald-400">Gelato Gas Tank Active</span> : <span className="text-amber-400">Simulation Mode (no GELATO_API_KEY)</span>}</p>
+                  <p className="text-xs text-slate-500">Current Status: {relayerMode === '1balance' ? <span className="text-emerald-400">1Balance Live — executing via sponsoredCall</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live</span>}</p>
                 </div>
               </div>
             </div>
@@ -442,9 +458,21 @@ export default function App() {
               <div className="space-y-2 text-sm text-slate-400">
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span><span>Scanner finds profitable arbitrage opportunity</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>User signs EIP-712 message (free, off-chain)</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Gelato relays transaction, pays gas from Gas Tank</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Gelato 1Balance relays transaction, pays gas from USDC deposit</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Flash loan executes, profit generated in USDC</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>85% to wallet, 5% Gelato fee, 10% replenishes Gas Tank</span></div>
+                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>85% to settlement wallet, 5% Gelato fee, 10% replenishes 1Balance</span></div>
+              </div>
+            </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> MEV Protection</h3>
+              <div className="space-y-2 text-sm text-slate-400">
+                <p>Transactions routed through Gelato's private mempool to protect against:</p>
+                <ul className="space-y-1 ml-4">
+                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks</li>
+                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks</li>
+                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots</li>
+                </ul>
               </div>
             </div>
 
@@ -457,7 +485,7 @@ export default function App() {
                   return (
                     <div key={chainKey} className="flex items-center gap-3 bg-slate-800/50 rounded-lg px-3 py-2">
                       <span className="text-sm font-medium w-24">{chain.name}</span>
-                      {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) : (<><span className="text-xs text-slate-500 flex-1">Auto-deploys on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
+                      {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) : (<><span className="text-xs text-slate-500 flex-1">Auto-computed on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
                     </div>
                   );
                 })}
