@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 export interface WalletState {
   address: string;
@@ -45,7 +45,10 @@ async function relay(action: string, payload: Record<string, unknown>): Promise<
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
     body: JSON.stringify({ action, ...payload }),
   });
-  if (!resp.ok) throw new Error(`Relayer error: ${resp.status}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+    throw new Error(err.error || `Relayer error: ${resp.status}`);
+  }
   return resp.json();
 }
 

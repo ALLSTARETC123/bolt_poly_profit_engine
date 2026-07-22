@@ -15,7 +15,7 @@ const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const supabase = supabaseUrl ? createClient(supabaseUrl, supabaseKey) : null;
 
 type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'settings';
-interface Alert { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
+interface AlertItem { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
@@ -36,16 +36,15 @@ export default function App() {
   const [deploying, setDeploying] = useState(false);
   const [deployedContracts, setDeployedContracts] = useState<Record<string, string>>({});
 
-  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [scanCount, setScanCount] = useState(0);
   const [totalProfit, setTotalProfit] = useState(0);
   const [executedCount, setExecutedCount] = useState(0);
-  const [failedCount, setFailedCount] = useState(0);
   const [relayerMode, setRelayerMode] = useState<string | null>(null);
 
   const scanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const pushAlert = useCallback((type: Alert['type'], message: string) => {
+  const pushAlert = useCallback((type: AlertItem['type'], message: string) => {
     setAlerts(prev => [{ id: Date.now().toString(), type, message, timestamp: Date.now() }, ...prev].slice(0, 20));
   }, []);
 
@@ -55,31 +54,16 @@ export default function App() {
         const loaded = await loadWallet();
         setWalletLoaded(true);
         if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
+      } catch { setWalletLoaded(true); }
 
-        let treasuryData: any[] | null = null;
-        if (supabase) {
-          const result = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
-          treasuryData = result.data;
-        }
-        if (treasuryData) {
-          const profit = (treasuryData as any[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
-          setTotalProfit(profit);
-        }
-
+      if (supabase) {
         try {
-          const walletResp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-            body: JSON.stringify({ action: 'db_select', table: 'arb_wallet', order: 'created_at.desc', limit: 1 }),
-          });
-          if (walletResp.ok) {
-            const walletResult = await walletResp.json();
-            const walletRow = walletResult.data?.[0];
-            if (walletRow?.deployed_contracts) setDeployedContracts(walletRow.deployed_contracts);
+          const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
+          if (treasuryData) {
+            const profit = (treasuryData as any[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
+            setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
-      } catch {
-        setWalletLoaded(true);
       }
 
       try {
@@ -91,12 +75,8 @@ export default function App() {
         if (resp.ok) {
           const health = await resp.json();
           setRelayerMode(health.mode);
-        } else {
-          setRelayerMode('unconfigured');
-        }
-      } catch {
-        setRelayerMode('unconfigured');
-      }
+        } else { setRelayerMode('simulation'); }
+      } catch { setRelayerMode('simulation'); }
     })();
   }, []);
 
@@ -116,8 +96,7 @@ export default function App() {
       const ws = await importWallet(importKey, password);
       setWallet(ws);
       pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setShowImport(false);
-      setImportKey('');
+      setShowImport(false); setImportKey('');
       setActiveTab('dashboard');
     } catch (err: any) { pushAlert('error', err.message); }
   };
@@ -177,15 +156,13 @@ export default function App() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
             body: JSON.stringify({
-              action: 'db_insert',
-              table: 'arb_opportunities',
+              action: 'db_insert', table: 'arb_opportunities',
               data: opps.map(opp => ({
                 chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
                 flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
                 estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
                 net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
-                confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
-                block_number: opp.blockNumber, executed: false,
+                confidence_score: opp.confidenceScore, block_number: opp.blockNumber, executed: false,
               })),
             }),
           });
@@ -196,9 +173,7 @@ export default function App() {
         const min = parseFloat(minProfit) || 0.10;
         for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
       }
-    } catch (err: any) {
-      pushAlert('error', `Scan failed: ${err.message?.slice(0, 100)}`);
-    }
+    } catch (err: any) { pushAlert('error', `Scan failed: ${err.message?.slice(0, 100)}`); }
   };
 
   const executeOpportunity = async (opp: ArbitrageOpportunity) => {
@@ -212,19 +187,7 @@ export default function App() {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
       pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)}`);
-      try {
-        await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-          body: JSON.stringify({
-            action: 'db_insert',
-            table: 'arb_treasury',
-            data: { type: 'profit', amount_usd: result.profitUsd || 0, chain: opp.chain, tx_hash: result.txHash, opportunity_type: opp.opportunityType },
-          }),
-        });
-      } catch { /* non-fatal */ }
     } else {
-      setFailedCount(prev => prev + 1);
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
     }
     setExecuting(false);
@@ -248,10 +211,10 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {relayerMode && relayerMode !== 'unconfigured' && (
+            {relayerMode && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-xs text-emerald-300">{relayerMode === 'gelato' ? 'Gelato Active' : 'Relay Active'}</span>
+                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'gelato' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
+                <span className="text-xs text-emerald-300">{relayerMode === 'gelato' ? 'Gelato Active' : 'Simulation'}</span>
               </div>
             )}
             {wallet && (
@@ -277,9 +240,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 flex gap-1">
           {(['dashboard', 'wallet', 'opportunities', 'settings'] as Tab[]).map(tab => (
             <button key={tab} onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors ${
-                activeTab === tab ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300'
-              }`}>{tab}</button>
+              className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors ${activeTab === tab ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{tab}</button>
           ))}
         </div>
       </header>
@@ -288,12 +249,7 @@ export default function App() {
         {alerts.length > 0 && (
           <div className="mb-4 space-y-1.5 max-h-32 overflow-y-auto">
             {alerts.slice(0, 5).map(alert => (
-              <div key={alert.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${
-                alert.type === 'success' ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300' :
-                alert.type === 'error' ? 'bg-red-950/50 border border-red-800/50 text-red-300' :
-                alert.type === 'warning' ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300' :
-                'bg-blue-950/50 border border-blue-800/50 text-blue-300'
-              }`}>
+              <div key={alert.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${alert.type === 'success' ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300' : alert.type === 'error' ? 'bg-red-950/50 border border-red-800/50 text-red-300' : alert.type === 'warning' ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300' : 'bg-blue-950/50 border border-blue-800/50 text-blue-300'}`}>
                 {alert.type === 'success' && <CheckCircle className="w-4 h-4 flex-shrink-0" />}
                 {alert.type === 'error' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
                 {alert.type === 'warning' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
@@ -319,29 +275,23 @@ export default function App() {
                 <Sparkles className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
                   <p className="text-sm font-semibold text-emerald-300">Zero-Gas Architecture</p>
-                  <p className="text-xs text-slate-400">
-                    No native tokens needed. Gelato Gas Tank pays gas from USDC. First arb profit funds all subsequent gas.
-                  </p>
+                  <p className="text-xs text-slate-400">No native tokens needed. Gelato Gas Tank pays gas from USDC. First arb profit funds all subsequent gas.</p>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-cyan-400" /> Engine Status
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Cpu className="w-4 h-4 text-cyan-400" /> Engine Status</h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gas Mode" value={relayerMode === 'gelato' ? 'GELATO' : relayerMode === 'unconfigured' ? 'PENDING' : String(relayerMode || 'PENDING')} color={relayerMode === 'gelato' ? 'emerald' : 'amber'} />
+                <StatusItem label="Gas Mode" value={relayerMode === 'gelato' ? 'GELATO' : 'SIMULATION'} color={relayerMode === 'gelato' ? 'emerald' : 'amber'} />
                 <StatusItem label="Flash Provider" value="Balancer V2" color="emerald" />
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status</h3>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
                   const chain = CHAINS[chainKey];
@@ -356,11 +306,7 @@ export default function App() {
                       <span className="text-xs text-slate-400">{oppCount} opps</span>
                       {result?.scanTimeMs !== undefined && <span className="text-xs text-slate-500">{result.scanTimeMs}ms</span>}
                       <div className="flex-1" />
-                      {hasContract ? (
-                        <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Deployed</span>
-                      ) : (
-                        <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>
-                      )}
+                      {hasContract ? <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Deployed</span> : <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>}
                     </div>
                   );
                 })}
@@ -368,27 +314,21 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities</h3>
               {allOpportunities.length === 0 ? (
                 <p className="text-sm text-slate-500 text-center py-8">{engineRunning ? 'Scanning...' : 'Start the engine to scan for arbitrage opportunities'}</p>
               ) : (
                 <div className="space-y-2">
                   {allOpportunities.slice(0, 10).map((opp, i) => (
                     <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded ${
-                        opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' :
-                        opp.opportunityType === 'two_dex' ? 'bg-blue-950/50 text-blue-300' : 'bg-cyan-950/50 text-cyan-300'
-                      }`}>{opp.opportunityType}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' : 'bg-blue-950/50 text-blue-300'}`}>{opp.opportunityType}</span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
                       <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
                       <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(2)}</span>
                       <span className="text-xs text-slate-500">{opp.profitMarginPct.toFixed(2)}%</span>
                       {wallet?.isUnlocked && deployedContracts[opp.chain] && (
-                        <button onClick={() => executeOpportunity(opp)} disabled={executing}
-                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded text-xs font-medium">Execute</button>
+                        <button onClick={() => executeOpportunity(opp)} disabled={executing} className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded text-xs font-medium">Execute</button>
                       )}
                     </div>
                   ))}
@@ -401,25 +341,19 @@ export default function App() {
         {activeTab === 'wallet' && (
           <div className="max-w-lg space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management</h3>
               {!walletLoaded ? <p className="text-sm text-slate-500">Loading...</p> : !wallet ? (
                 <div className="space-y-4">
                   <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. You never need native tokens.</p>
                   <div className="space-y-3">
                     <div className="relative">
-                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)"
-                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
-                      <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
+                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
+                      <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">{showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
                     </div>
                     <button onClick={handleGenerateWallet} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium">Generate New Wallet</button>
                     {showImport && (
                       <div className="space-y-2 pt-2 border-t border-slate-800">
-                        <input type="text" value={importKey} onChange={e => setImportKey(e.target.value)} placeholder="Private key (0x...)"
-                          className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono" />
+                        <input type="text" value={importKey} onChange={e => setImportKey(e.target.value)} placeholder="Private key (0x...)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono" />
                         <button onClick={handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium">Import Wallet</button>
                       </div>
                     )}
@@ -430,11 +364,8 @@ export default function App() {
                 <div className="space-y-4">
                   <p className="text-sm text-slate-400">Wallet found: <span className="font-mono text-slate-300">{wallet.address}</span></p>
                   <div className="relative">
-                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && handleUnlock()}
-                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
-                    <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
+                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && handleUnlock()} className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
+                    <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">{showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
                   </div>
                   <button onClick={handleUnlock} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium">Unlock Wallet</button>
                 </div>
@@ -445,9 +376,7 @@ export default function App() {
                     <p className="text-sm font-mono text-emerald-300">{wallet.address}</p>
                   </div>
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
-                    <p className="text-xs text-emerald-300 flex items-center gap-1.5">
-                      <Sparkles className="w-3 h-3" /> Zero-gas mode active. No native tokens needed.
-                    </p>
+                    <p className="text-xs text-emerald-300 flex items-center gap-1.5"><Sparkles className="w-3 h-3" /> Zero-gas mode active. No native tokens needed.</p>
                   </div>
                 </div>
               )}
@@ -463,10 +392,7 @@ export default function App() {
                 <div className="space-y-2">
                   {allOpportunities.map((opp, i) => (
                     <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded ${
-                        opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' :
-                        opp.opportunityType === 'two_dex' ? 'bg-blue-950/50 text-blue-300' : 'bg-cyan-950/50 text-cyan-300'
-                      }`}>{opp.opportunityType}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded ${opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' : 'bg-blue-950/50 text-blue-300'}`}>{opp.opportunityType}</span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
                       <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
@@ -484,9 +410,7 @@ export default function App() {
         {activeTab === 'settings' && (
           <div className="max-w-lg space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Settings className="w-4 h-4 text-cyan-400" /> Engine Settings
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Settings className="w-4 h-4 text-cyan-400" /> Engine Settings</h3>
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div><p className="text-sm font-medium text-slate-300">Auto-Execute</p><p className="text-xs text-slate-500">Automatically execute profitable opportunities</p></div>
@@ -502,53 +426,30 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-emerald-400" /> Zero-Gas Architecture
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-400" /> Zero-Gas Architecture</h3>
               <div className="space-y-3 text-sm text-slate-400">
                 <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Gelato Gas Tank</p><p className="text-xs">Deposit USDC once. Gelato pays gas on ALL chains.</p></div></div>
                 <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Self-Funding from First Arb</p><p className="text-xs">10% of profit auto-deposits to Gas Tank, funding all future gas.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Profit Distribution</p><p className="text-xs">85% to wallet, 5% Gelato fee, 10% Gas Tank reserve.</p></div></div>
                 <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">EIP-712 Gasless Signing</p><p className="text-xs">You sign off-chain (free). Gelato relays the transaction.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Private Mempool</p><p className="text-xs">Gelato routes through private mempools, protecting against MEV.</p></div></div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Relayer Status: {relayerMode === 'gelato' ? <span className="text-emerald-400">Gelato Gas Tank Active</span> : relayerMode === 'unconfigured' ? <span className="text-amber-400">Unconfigured</span> : <span className="text-slate-400">Checking...</span>}</p>
+                  <p className="text-xs text-slate-500">Relayer Status: {relayerMode === 'gelato' ? <span className="text-emerald-400">Gelato Gas Tank Active</span> : <span className="text-amber-400">Simulation Mode (no GELATO_API_KEY)</span>}</p>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Shield className="w-4 h-4 text-cyan-400" /> MEV Protection
-              </h3>
-              <div className="space-y-2 text-sm text-slate-400">
-                <p>Transactions are routed through private mempools to protect against:</p>
-                <ul className="space-y-1 ml-4">
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks</li>
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks</li>
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots</li>
-                </ul>
-              </div>
-            </div>
-
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas Cycle
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Fuel className="w-4 h-4 text-amber-400" /> Self-Funding Gas Cycle</h3>
               <div className="space-y-2 text-sm text-slate-400">
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span><span>Scanner finds profitable arbitrage opportunity</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>User signs EIP-712 message (free, off-chain)</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Gelato relays transaction, pays gas from Gas Tank</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Flash loan executes, profit generated in USDC</span></div>
                 <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>85% to wallet, 5% Gelato fee, 10% replenishes Gas Tank</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-cyan-600 flex items-center justify-center text-white">{'\u21BB'}</span><span className="text-cyan-300">Gas Tank now has USDC - next arb is fully self-funded</span></div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts
-              </h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts</h3>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
                   const chain = CHAINS[chainKey];
@@ -556,8 +457,7 @@ export default function App() {
                   return (
                     <div key={chainKey} className="flex items-center gap-3 bg-slate-800/50 rounded-lg px-3 py-2">
                       <span className="text-sm font-medium w-24">{chain.name}</span>
-                      {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) :
-                        (<><span className="text-xs text-slate-500 flex-1">Auto-deploys on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
+                      {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) : (<><span className="text-xs text-slate-500 flex-1">Auto-deploys on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
                     </div>
                   );
                 })}
