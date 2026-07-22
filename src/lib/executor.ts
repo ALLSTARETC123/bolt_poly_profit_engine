@@ -13,8 +13,8 @@ import { ethers } from 'ethers';
 import { CHAINS } from './chains';
 import { ArbitrageOpportunity } from './scanner';
 
-const supabaseUrl = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env.VITE_SUPABASE_URL : '';
-const supabaseKey = (typeof import.meta !== 'undefined' && import.meta.env) ? import.meta.env.VITE_SUPABASE_ANON_KEY : '';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const EXECUTOR_ABI = [
   'function executeArb(address asset, uint256 amount, bytes params) external',

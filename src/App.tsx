@@ -3,7 +3,7 @@ import { ethers } from 'ethers';
 import { createClient } from '@supabase/supabase-js';
 import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
-  Shield, Zap, CheckCircle, AlertTriangle, Clock,
+  Shield, CheckCircle, AlertTriangle, Clock,
   Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS } from './lib/chains';
@@ -11,8 +11,8 @@ import { scanAllChains, ArbitrageOpportunity, ScanResult } from './lib/scanner';
 import { deployExecutorGasless, executeArbitrageGasless, DeploymentResult, ExecutionResult } from './lib/executor';
 import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, WalletState } from './lib/wallet';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'settings';
@@ -53,34 +53,39 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const loaded = await loadWallet();
-      setWalletLoaded(true);
-      if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
-
-      const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
-      if (treasuryData) {
-        const profit = (treasuryData as any[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
-        setTotalProfit(profit);
-      }
-
-      const { data: walletData } = await supabase.from('arb_wallet').select('deployed_contracts').order('created_at', { ascending: false }).limit(1).maybeSingle();
-      if (walletData?.deployed_contracts) setDeployedContracts(walletData.deployed_contracts);
-
       try {
-        const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-          body: JSON.stringify({ action: 'health' }),
-        });
-        if (resp.ok) {
-          const health = await resp.json();
-          setRelayerMode(health.mode);
-          if (health.balances) {
-            const total = Object.values(health.balances).reduce((s: number, b: unknown) => s + parseFloat(String(b)), 0);
-            if (total > 0) setGasTankBalance(total.toFixed(4));
-          }
+        const loaded = await loadWallet();
+        setWalletLoaded(true);
+        if (loaded) setWallet({ address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt, isUnlocked: false, signer: null });
+
+        const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
+        if (treasuryData) {
+          const profit = (treasuryData as any[]).filter(t => t.type === 'profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
+          setTotalProfit(profit);
         }
-      } catch { setRelayerMode('unconfigured'); }
+
+        const { data: walletData } = await supabase.from('arb_wallet').select('deployed_contracts').order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (walletData?.deployed_contracts) setDeployedContracts(walletData.deployed_contracts);
+
+        try {
+          const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
+            body: JSON.stringify({ action: 'health' }),
+          });
+          if (resp.ok) {
+            const health = await resp.json();
+            setRelayerMode(health.mode);
+            if (health.balances) {
+              const total = Object.values(health.balances).reduce((s: number, b: unknown) => s + parseFloat(String(b)), 0);
+              if (total > 0) setGasTankBalance(total.toFixed(4));
+            }
+          } else { setRelayerMode('unconfigured'); }
+        } catch { setRelayerMode('unconfigured'); }
+      } catch (err) {
+        setWalletLoaded(true);
+        setRelayerMode('unconfigured');
+      }
     })();
   }, []);
 
@@ -137,33 +142,39 @@ export default function App() {
 
   const runScan = async () => {
     setScanCount(prev => prev + 1);
-    const results = await scanAllChains();
-    setScanResults(results);
-    const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
-    setAllOpportunities(opps);
+    try {
+      const results = await scanAllChains();
+      setScanResults(results);
+      const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
+      setAllOpportunities(opps);
 
-    if (opps.length > 0) {
-      await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-        body: JSON.stringify({
-          action: 'db_insert',
-          table: 'arb_opportunities',
-          data: opps.map(opp => ({
-            chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
-            flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
-            estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
-            net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
-            confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
-            block_number: opp.blockNumber, executed: false,
-          })),
-        }),
-      });
-    }
+      if (opps.length > 0) {
+        try {
+          await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
+            body: JSON.stringify({
+              action: 'db_insert',
+              table: 'arb_opportunities',
+              data: opps.map(opp => ({
+                chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
+                flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
+                estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
+                net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
+                confidence_score: opp.confidenceScore, flash_provider: opp.flashProvider,
+                block_number: opp.blockNumber, executed: false,
+              })),
+            }),
+          });
+        } catch { /* non-fatal */ }
+      }
 
-    if (autoExecute && wallet?.signer) {
-      const min = parseFloat(minProfit) || 0.10;
-      for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
+      if (autoExecute && wallet?.signer) {
+        const min = parseFloat(minProfit) || 0.10;
+        for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
+      }
+    } catch (err: any) {
+      pushAlert('error', `Scan failed: ${err.message?.slice(0, 100)}`);
     }
   };
 
