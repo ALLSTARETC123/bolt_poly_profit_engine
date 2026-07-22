@@ -16,12 +16,8 @@ export interface ChainConfig {
   id: number;
   name: string;
   rpc: string[];
-  privateRpc: string[];
   balancerVault: string;
-  dodoApprove: string;
-  dodoProxy: string;
   dvmFactory: string;
-  gelatoRelayerAddress: string;
   gelatoFeeCollector: string;
   dexes: DexConfig[];
   tokens: Record<string, TokenConfig>;
@@ -33,21 +29,12 @@ export const CHAINS: Record<string, ChainConfig> = {
   polygon: {
     id: 137,
     name: 'Polygon',
-    rpc: [
-      'https://polygon-bor-rpc.publicnode.com',
-      'https://rpc.ankr.com/polygon',
-    ],
-    privateRpc: [
-      'https://rpc.flashbots.net/fast',
-    ],
+    rpc: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
     balancerVault: '0xBA12222222228d8Ba445958a75a0704D566BF2C8',
-    dodoApprove: '0xA956Bf481c3c0d3E5A56a18c6167bb0E82D33D92',
-    dodoProxy: '0x8e0b6cD8f8dE5F7A6c0c0A0c0c0c0c0c0c0c0c0c0',
     dvmFactory: '0x3c5B36469C026C4585E9206090eABD5B2F3eAB6B',
-    gelatoRelayerAddress: '0x7A0B1C3d4e5F6789012345678901234567890123',
     gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
-      { name: 'QuickSwap', type: 'algebra', router: '0xa5E0829CaCEd8fFCEEd813c0750d57F89A5c0c0c', factory: '0x575737141443441C6e51785CD7665248d39B8C42' },
+      { name: 'QuickSwap', type: 'algebra', router: '0xa5E0829CaCEd813cA8E0458745D5f8e75A8EaB22', factory: '0x575737141443441C6e51785CD7665248d39B8C42' },
       { name: 'SushiSwap', type: 'uniswap_v2', router: '0x1b02dA8Cb0d097eB8D57A175b88c3D4991356312', factory: '0xc35DADB65012eC812c0F2c0a6B68cF7B6161F0A8' },
       { name: 'UniswapV3', type: 'uniswap_v3', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', quoter: '0xb27308f9F90d607573F4b7626BB1C6f85a8192D' },
     ],
@@ -55,7 +42,7 @@ export const CHAINS: Record<string, ChainConfig> = {
       WMATIC: { address: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270', symbol: 'WMATIC', decimals: 18 },
       WETH: { address: '0x7ceB23FD6BC0add76E50e4474b4f871b6c1c1a40', symbol: 'WETH', decimals: 18 },
       USDC: { address: '0x2791Bca1f2de4661ED88A30C99A7a9c9604150Bf', symbol: 'USDC', decimals: 6 },
-      USDT: { address: '0xc2132D05D31c93e585aF3c4f871b6c1c1a40', symbol: 'USDT', decimals: 6 },
+      USDT: { address: '0xc2132D05D31c958aF3c4f871b6c1c1a40', symbol: 'USDT', decimals: 6 },
       DAI: { address: '0x8f3Cf7ad23Cd3cDb2184256e6f9b65a4B6c1c1a40', symbol: 'DAI', decimals: 18 },
       WBTC: { address: '0x1BFD67037Ed42c865aF3c0d3e2f871b6c1c1a40', symbol: 'WBTC', decimals: 8 },
     },
@@ -63,16 +50,9 @@ export const CHAINS: Record<string, ChainConfig> = {
   arbitrum: {
     id: 42161,
     name: 'Arbitrum',
-    rpc: [
-      'https://arbitrum-one-rpc.publicnode.com',
-      'https://rpc.ankr.com/arbitrum',
-    ],
-    privateRpc: [],
+    rpc: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'],
     balancerVault: '0xBA12222222228d8Ba445958a75a0704D566BF2C8',
-    dodoApprove: '0x8e0b6cD8f8dE5F7A6c0c0A0c0c0c0c0c0c0c0c0c0',
-    dodoProxy: '0x8e0b6cD8f8dE5F7A6c0c0A0c0c0c0c0c0c0c0c0c0c0',
     dvmFactory: '0x3c5B36469C026C4585E9206090eABD5B2F3eAB6B',
-    gelatoRelayerAddress: '0x7A0B1C3d4e5F6789012345678901234567890123',
     gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
       { name: 'UniswapV3', type: 'uniswap_v3', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', quoter: '0xb2d49E0f5b0c1c0c0c0c0c0c0c0c0c0c0c0c0c0c0' },
@@ -91,16 +71,9 @@ export const CHAINS: Record<string, ChainConfig> = {
   optimism: {
     id: 10,
     name: 'Optimism',
-    rpc: [
-      'https://optimism-rpc.publicnode.com',
-      'https://rpc.ankr.com/optimism',
-    ],
-    privateRpc: [],
+    rpc: ['https://mainnet.optimism.io', 'https://optimism-rpc.publicnode.com'],
     balancerVault: '0xBA12222222228d8Ba445958a75a0704D566BF2C8',
-    dodoApprove: '0x8e0b6cD8f8dE5F7A6c0c0A0c0c0c0c0c0c0c0c0c0',
-    dodoProxy: '0x8e0b6cD8f8dE5F7A6c0c0A0c0c0c0c0c0c0c0c0c0c0',
     dvmFactory: '0x3c5B36469C026C4585E9206090eABD5B2F3eAB6B',
-    gelatoRelayerAddress: '0x7A0B1C3d4e5F6789012345678901234567890123',
     gelatoFeeCollector: GELATO_FEE_COLLECTOR,
     dexes: [
       { name: 'UniswapV3', type: 'uniswap_v3', router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', quoter: '0xb2d49E0f5b0c1c0c0c0c0c0c0c0c0c0c0c0c0c0c0' },
@@ -117,13 +90,6 @@ export const CHAINS: Record<string, ChainConfig> = {
 };
 
 export const CHAIN_KEYS = Object.keys(CHAINS);
-
-export const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-];
 
 export const V2_PAIR_ABI = [
   'function getReserves() view returns (uint112, uint112, uint32)',
@@ -144,32 +110,21 @@ export const DODO_FACTORY_ABI = [
 
 export const TRIANGULAR_PATHS: Record<string, [string, string, string][]> = {
   polygon: [
-    ['WMATIC', 'USDC', 'DAI'],
-    ['WMATIC', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'WMATIC'],
-    ['WETH', 'USDC', 'DAI'],
-    ['USDC', 'DAI', 'USDT'],
-    ['WBTC', 'WETH', 'USDC'],
-    ['WETH', 'WMATIC', 'USDC'],
-    ['WETH', 'WMATIC', 'DAI'],
+    ['WMATIC', 'USDC', 'DAI'], ['WMATIC', 'USDC', 'USDT'],
+    ['WETH', 'USDC', 'WMATIC'], ['WETH', 'USDC', 'DAI'],
+    ['USDC', 'DAI', 'USDT'], ['WBTC', 'WETH', 'USDC'],
+    ['WETH', 'WMATIC', 'USDC'], ['WETH', 'WMATIC', 'DAI'],
   ],
   arbitrum: [
-    ['WETH', 'USDC', 'DAI'],
-    ['WETH', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'ARB'],
-    ['WETH', 'WBTC', 'USDC'],
-    ['USDC', 'DAI', 'USDT'],
-    ['ARB', 'WETH', 'USDC'],
-    ['WETH', 'DAI', 'USDT'],
-    ['WBTC', 'WETH', 'USDT'],
+    ['WETH', 'USDC', 'DAI'], ['WETH', 'USDC', 'USDT'],
+    ['WETH', 'USDC', 'ARB'], ['WETH', 'WBTC', 'USDC'],
+    ['USDC', 'DAI', 'USDT'], ['ARB', 'WETH', 'USDC'],
+    ['WETH', 'DAI', 'USDT'], ['WBTC', 'WETH', 'USDT'],
   ],
   optimism: [
-    ['WETH', 'USDC', 'DAI'],
-    ['WETH', 'USDC', 'USDT'],
-    ['WETH', 'USDC', 'OP'],
-    ['USDC', 'DAI', 'USDT'],
-    ['OP', 'WETH', 'USDC'],
-    ['WETH', 'DAI', 'USDT'],
+    ['WETH', 'USDC', 'DAI'], ['WETH', 'USDC', 'USDT'],
+    ['WETH', 'USDC', 'OP'], ['USDC', 'DAI', 'USDT'],
+    ['OP', 'WETH', 'USDC'], ['WETH', 'DAI', 'USDT'],
   ],
 };
 
@@ -180,7 +135,7 @@ export const TWO_DEX_PAIRS: Record<string, [string, string][]> = {
   ],
   arbitrum: [
     ['WETH', 'USDC'], ['WETH', 'USDT'], ['WETH', 'DAI'], ['USDC', 'DAI'],
-    ['USDT', 'USDT'], ['WETH', 'ARB'], ['WBTC', 'WETH'], ['ARB', 'USDC'],
+    ['WETH', 'ARB'], ['WBTC', 'WETH'], ['ARB', 'USDC'], ['DAI', 'USDT'],
   ],
   optimism: [
     ['WETH', 'USDC'], ['WETH', 'USDT'], ['WETH', 'DAI'], ['USDC', 'DAI'],
