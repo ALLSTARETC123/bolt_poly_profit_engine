@@ -22,7 +22,6 @@ const GELATO_CHAIN_IDS: Record<string, number> = {
   polygon: 137, arbitrum: 42161, optimism: 10,
 };
 
-// USDC addresses — the fee token Gelato deducts from the contract's own profit
 const FEE_TOKENS: Record<string, string> = {
   polygon: "0x2791Bca1f2de4661ED88A30C99A7a9c9604150Bf",
   arbitrum: "0xaf88d065e77c8cC2239D7c0c0c0c0c0c0c0c0c0c",
@@ -81,7 +80,6 @@ Deno.serve(async (req: Request) => {
       const rpcUrl = CHAIN_RPCS[chainKey];
       if (!rpcUrl) return jsonError("Unknown chain");
 
-      // Compute deterministic CREATE2 address for the executor contract
       const salt = hashStr(chainKey + userAddress);
       const factoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
       const computedAddress = computeCreate2(factoryAddress, salt);
@@ -100,16 +98,11 @@ Deno.serve(async (req: Request) => {
       const rpcUrl = CHAIN_RPCS[chainKey];
       if (!rpcUrl) return jsonError("Unknown chain");
 
-      // Live execution via Gelato callWithSyncFee — zero deposit needed
-      // The executor contract pays Gelato's fee from the arbitrage profit itself
-      // during transaction execution. No 1Balance deposit required.
       if (GELATO_API_KEY) {
         try {
           const chainId = GELATO_CHAIN_IDS[chainKey];
           const feeToken = FEE_TOKENS[chainKey];
 
-          // callWithSyncFee: contract pays Gelato's fee from its own profit
-          // No 1Balance deposit needed — fee is deducted during execution
           const gelatoResp = await fetch("https://relay.gelato.network/callWithSyncFee", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -155,7 +148,6 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // Simulation mode: record as simulated execution
       await supabase.from("arb_treasury").insert({
         type: "simulated_profit",
         amount_usd: opportunity.netProfit,
