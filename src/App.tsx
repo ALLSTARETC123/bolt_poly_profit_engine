@@ -3,12 +3,12 @@ import { createClient } from '@supabase/supabase-js';
 import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, CheckCircle, AlertTriangle, Clock,
-  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Sparkles, Rocket, Zap,
+  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Rocket, Zap,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
-import { scanAllChains, ArbitrageOpportunity, ScanResult } from './lib/scanner';
-import { deployExecutorGasless, executeArbitrageGasless, DeploymentResult, ExecutionResult } from './lib/executor';
-import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, WalletState } from './lib/wallet';
+import { scanAllChains, type ArbitrageOpportunity, type ScanResult } from './lib/scanner';
+import { deployExecutorGasless, executeArbitrageGasless, type DeploymentResult, type ExecutionResult } from './lib/executor';
+import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, type WalletState } from './lib/wallet';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -61,9 +61,9 @@ export default function App() {
 
       if (supabase) {
         try {
-          const { data: treasuryData } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
-          if (treasuryData) {
-            const profit = (treasuryData as any[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
+          const { data: td } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
+          if (td) {
+            const profit = (td as any[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
             setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
@@ -75,10 +75,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
           body: JSON.stringify({ action: 'health' }),
         });
-        if (resp.ok) {
-          const health = await resp.json();
-          setRelayerMode(health.mode);
-        } else { setRelayerMode('simulation'); }
+        setRelayerMode(resp.ok ? (await resp.json()).mode : 'simulation');
       } catch { setRelayerMode('simulation'); }
     })();
   }, []);
@@ -89,9 +86,8 @@ export default function App() {
       const ws = await generateWallet(password);
       setWallet(ws);
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
-      if (ws.settlementAddress) pushAlert('info', `Settlement wallet: ${ws.settlementAddress.slice(0, 10)}...`);
       setActiveTab('dashboard');
-    } catch (err: any) { pushAlert('error', err.message); }
+    } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
   const handleImportWallet = async () => {
@@ -102,7 +98,7 @@ export default function App() {
       pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
       setShowImport(false); setImportKey('');
       setActiveTab('dashboard');
-    } catch (err: any) { pushAlert('error', err.message); }
+    } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
   const handleUnlock = async () => {
@@ -118,7 +114,6 @@ export default function App() {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
     setDeploying(true);
     pushAlert('info', 'Computing executor addresses (zero gas)...');
-
     for (const chainKey of CHAIN_KEYS) {
       if (!deployedContracts[chainKey]) {
         const result: DeploymentResult = await deployExecutorGasless(wallet.signer!, chainKey);
@@ -132,7 +127,6 @@ export default function App() {
         }
       }
     }
-
     setDeploying(false);
     setEngineRunning(true);
     pushAlert('success', `Engine started — scanning every ${SCAN_INTERVAL_MS / 1000}s`);
@@ -153,31 +147,26 @@ export default function App() {
       setScanResults(results);
       const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
       setAllOpportunities(opps);
-
       if (opps.length > 0) {
         try {
           await fetch(`${supabaseUrl}/functions/v1/relayer`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-            body: JSON.stringify({
-              action: 'db_insert', table: 'arb_opportunities',
-              data: opps.map(opp => ({
-                chain: opp.chain, opportunity_type: opp.opportunityType, token_path: opp.tokenPath, dex_path: opp.dexPath,
-                flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
-                estimated_profit: opp.estimatedProfit, estimated_gas_cost: opp.estimatedGasCost,
-                net_profit: opp.netProfit, profit_margin_pct: opp.profitMarginPct,
-                confidence_score: opp.confidenceScore, block_number: opp.blockNumber, executed: false,
-              })),
-            }),
+            body: JSON.stringify({ action: 'db_insert', table: 'arb_opportunities', data: opps.map(o => ({
+              chain: o.chain, opportunity_type: o.opportunityType, token_path: o.tokenPath, dex_path: o.dexPath,
+              flash_loan_asset: o.flashLoanAsset, flash_loan_amount: o.flashLoanAmount,
+              estimated_profit: o.estimatedProfit, estimated_gas_cost: o.estimatedGasCost,
+              net_profit: o.netProfit, profit_margin_pct: o.profitMarginPct,
+              confidence_score: o.confidenceScore, block_number: o.blockNumber, executed: false,
+            })) }),
           });
         } catch { /* non-fatal */ }
       }
-
       if (autoExecute && wallet?.signer) {
         const min = parseFloat(minProfit) || 0.10;
         for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
       }
-    } catch (err: any) { pushAlert('error', `Scan failed: ${err.message?.slice(0, 100)}`); }
+    } catch (err: unknown) { pushAlert('error', `Scan failed: ${String(err).slice(0, 100)}`); }
   };
 
   const executeOpportunity = async (opp: ArbitrageOpportunity) => {
@@ -197,7 +186,7 @@ export default function App() {
     setExecuting(false);
   };
 
-  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString();
+  const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-200">
@@ -217,7 +206,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             {relayerMode && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'syncfee' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'} `} />
+                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'syncfee' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
                 <span className="text-xs text-emerald-300">{relayerMode === 'syncfee' ? 'SyncFee Live' : 'Simulation'}</span>
               </div>
             )}
@@ -252,14 +241,14 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 py-6">
         {alerts.length > 0 && (
           <div className="mb-4 space-y-1.5 max-h-32 overflow-y-auto">
-            {alerts.slice(0, 5).map(alert => (
-              <div key={alert.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${alert.type === 'success' ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300' : alert.type === 'error' ? 'bg-red-950/50 border border-red-800/50 text-red-300' : alert.type === 'warning' ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300' : 'bg-blue-950/50 border border-blue-800/50 text-blue-300'}`}>
-                {alert.type === 'success' && <CheckCircle className="w-4 h-4 flex-shrink-0" />}
-                {alert.type === 'error' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
-                {alert.type === 'warning' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
-                {alert.type === 'info' && <Activity className="w-4 h-4 flex-shrink-0" />}
-                <span className="flex-1">{alert.message}</span>
-                <span className="text-xs opacity-50">{formatTime(alert.timestamp)}</span>
+            {alerts.slice(0, 5).map(a => (
+              <div key={a.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${a.type === 'success' ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300' : a.type === 'error' ? 'bg-red-950/50 border border-red-800/50 text-red-300' : a.type === 'warning' ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300' : 'bg-blue-950/50 border border-blue-800/50 text-blue-300'}`}>
+                {a.type === 'success' && <CheckCircle className="w-4 h-4 flex-shrink-0" />}
+                {a.type === 'error' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
+                {a.type === 'warning' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
+                {a.type === 'info' && <Activity className="w-4 h-4 flex-shrink-0" />}
+                <span className="flex-1">{a.message}</span>
+                <span className="text-xs opacity-50">{fmtTime(a.timestamp)}</span>
               </div>
             ))}
           </div>
@@ -361,7 +350,7 @@ export default function App() {
                         <button onClick={handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium">Import Wallet</button>
                       </div>
                     )}
-                    {!showImport && <button onClick={() => setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">Import existing wallet{' >'}</button>}
+                    {!showImport && <button onClick={() => setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">Import existing wallet &gt;</button>}
                   </div>
                 </div>
               ) : !wallet.isUnlocked ? (
@@ -456,12 +445,9 @@ export default function App() {
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Fuel className="w-4 h-4 text-amber-400" /> How callWithSyncFee Works (Zero Deposit)</h3>
               <div className="space-y-2 text-sm text-slate-400">
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">1</span><span>Scanner finds profitable arbitrage opportunity</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">2</span><span>Gelato relays the transaction to the executor contract</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">3</span><span>Contract takes Balancer 0% flash loan (no collateral)</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">4</span><span>Arb executes, profit is generated in USDC</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">5</span><span>Contract pays Gelato's fee from the profit (callWithSyncFee)</span></div>
-                <div className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">6</span><span>Remaining profit goes to your settlement wallet</span></div>
+                {['Scanner finds profitable arbitrage opportunity','Gelato relays the transaction to the executor contract','Contract takes Balancer 0% flash loan (no collateral)','Arb executes, profit is generated in USDC','Contract pays Gelato\'s fee from the profit (callWithSyncFee)','Remaining profit goes to your settlement wallet'].map((step, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">{i+1}</span><span>{step}</span></div>
+                ))}
                 <p className="text-xs text-emerald-300 mt-2 pl-7">No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.</p>
               </div>
             </div>
@@ -501,10 +487,10 @@ export default function App() {
 }
 
 function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string; color: string }) {
-  const colorMap: Record<string, string> = { emerald: 'text-emerald-400 bg-emerald-950/30', cyan: 'text-cyan-400 bg-cyan-950/30', blue: 'text-blue-400 bg-blue-950/30' };
+  const cm: Record<string, string> = { emerald: 'text-emerald-400 bg-emerald-950/30', cyan: 'text-cyan-400 bg-cyan-950/30', blue: 'text-blue-400 bg-blue-950/30' };
   return (
     <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-4">
-      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${colorMap[color] || colorMap.emerald}`}>{icon}</div>
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${cm[color] || cm.emerald}`}>{icon}</div>
       <p className="text-xs text-slate-500">{label}</p>
       <p className="text-lg font-bold text-white">{value}</p>
     </div>
@@ -512,6 +498,6 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
 }
 
 function StatusItem({ label, value, color }: { label: string; value: string; color: string }) {
-  const colorMap: Record<string, string> = { emerald: 'text-emerald-400', cyan: 'text-cyan-400', slate: 'text-slate-500', amber: 'text-amber-400' };
-  return (<div><p className="text-xs text-slate-500">{label}</p><p className={`text-sm font-semibold ${colorMap[color] || colorMap.slate}`}>{value}</p></div>);
+  const cm: Record<string, string> = { emerald: 'text-emerald-400', cyan: 'text-cyan-400', slate: 'text-slate-500', amber: 'text-amber-400' };
+  return <div><p className="text-xs text-slate-500">{label}</p><p className={`text-sm font-semibold ${cm[color] || cm.slate}`}>{value}</p></div>;
 }

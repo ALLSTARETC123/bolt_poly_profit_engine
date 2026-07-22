@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { CHAINS, CHAIN_KEYS, V2_PAIR_ABI, V2_FACTORY_ABI, PAIR_PATHS, TWO_DEX_PAIRS } from './chains';
+import { CHAINS, CHAIN_KEYS, V2_PAIR_ABI, V2_FACTORY_ABI, PAIR_PATHS, TWO_DEX_PAIRS, type DexConfig, type TokenConfig } from './chains';
 
 export interface ArbitrageOpportunity {
   chain: string;
@@ -58,8 +58,8 @@ async function scanChain(chainKey: string): Promise<ScanResult> {
       opportunities: withNet.filter(o => o.netProfit > 0).sort((a, b) => b.netProfit - a.netProfit),
       scanTimeMs: Date.now() - start,
     };
-  } catch (err: any) {
-    return { chain: chainKey, opportunities: [], scanTimeMs: Date.now() - start, error: err.message };
+  } catch (err: unknown) {
+    return { chain: chainKey, opportunities: [], scanTimeMs: Date.now() - start, error: String(err) };
   }
 }
 
@@ -101,7 +101,7 @@ async function scanTriangular(chainKey: string, provider: ethers.JsonRpcProvider
       getBestPrice(chainKey, provider, b, c),
       getBestPrice(chainKey, provider, c, a),
     ]);
-    if (p1.length === 0 || p2.length === 0 || p3.length === 0) return null;
+    if (!p1.length || !p2.length || !p3.length) return null;
     const buyA = p1[0], midBC = p2[0], sellCA = p3[0];
     if (buyA.price <= 0 || midBC.price <= 0 || sellCA.price <= 0) return null;
     const startAmount = FLASH_AMOUNTS[a] || 10000;
@@ -134,25 +134,24 @@ async function getBestPrice(chainKey: string, provider: ethers.JsonRpcProvider, 
   const amountIn = ethers.parseUnits('1', tA.decimals);
   const results = await Promise.allSettled(
     chain.dexes.map(async (dex) => {
-      try {
-        const price = await getPriceFromDex(provider, dex, tA, tB, amountIn);
-        return { price, dex: dex.name };
-      } catch { return null; }
+      const price = await getPriceFromDex(provider, dex, tA, tB, amountIn);
+      return { price, dex: dex.name };
     })
   );
   const prices: PriceResult[] = [];
-  for (const r of results) if (r.status === 'fulfilled' && r.value && r.value.price > 0) prices.push(r.value);
+  for (const r of results) if (r.status === 'fulfilled' && r.value.price > 0) prices.push(r.value);
   return prices.sort((a, b) => b.price - a.price);
 }
 
-async function getPriceFromDex(provider: ethers.JsonRpcProvider, dex: any, tokenIn: any, tokenOut: any, amountIn: bigint): Promise<number> {
+async function getPriceFromDex(provider: ethers.JsonRpcProvider, dex: DexConfig, tokenIn: TokenConfig, tokenOut: TokenConfig, amountIn: bigint): Promise<number> {
   try {
+    if (!dex.factory) return 0;
     const factory = new ethers.Contract(dex.factory, V2_FACTORY_ABI, provider);
     const pairAddress = await factory.getPair(tokenIn.address, tokenOut.address);
     if (pairAddress === ethers.ZeroAddress) return 0;
     const pair = new ethers.Contract(pairAddress, V2_PAIR_ABI, provider);
     const [reserve0, reserve1] = await pair.getReserves();
-    const token0 = await pair.token0();
+    const token0: string = await pair.token0();
     let reserveIn: bigint, reserveOut: bigint;
     if (token0.toLowerCase() === tokenIn.address.toLowerCase()) { reserveIn = reserve0; reserveOut = reserve1; }
     else { reserveIn = reserve1; reserveOut = reserve0; }
@@ -168,10 +167,12 @@ async function fetchGasCost(chainKey: string, provider: ethers.JsonRpcProvider):
     const gasPrice = feeData.gasPrice || ethers.parseUnits('30', 'gwei');
     const gasCostNative = parseFloat(ethers.formatEther(gasPrice * 500000n));
     const chain = CHAINS[chainKey];
-    const native = chain.tokens.WMATIC || chain.tokens.WETH || chain.tokens.OP;
+    const native = chain.tokens['WMATIC'] || chain.tokens['WETH'] || chain.tokens['OP'];
     if (!native) return 0.5;
     const prices = await getBestPrice(chainKey, provider, native.symbol, 'USDC');
-    if (prices.length === 0) return 0.5;
+    if (!prices.length) return 0.5;
     return gasCostNative * prices[0].price;
   } catch { return 0.5; }
 }
+
+
