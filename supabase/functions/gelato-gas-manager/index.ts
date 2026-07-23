@@ -180,13 +180,12 @@ function getFlashLoanProvider(providerKey: string) {
   return { success: true, ...provider };
 }
 
-async function saveGasRecord(chainKey: string, taskId: string | null, type: string, amountUsd: number, txHash: string | null) {
+async function saveGasRecord(chainKey: string, taskId: string | null, type: string, amountUsd: number, _txHash: string | null) {
   try {
     await supabase.from("arb_treasury").insert({
       type,
       amount_usd: amountUsd,
       chain: chainKey,
-      tx_hash: txHash || taskId,
     });
   } catch { /* non-fatal */ }
 }

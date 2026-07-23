@@ -1,115 +1,137 @@
 import { ethers } from 'ethers';
+import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabase = supabaseUrl ? createClient(supabaseUrl, supabaseKey) : null;
 
 export interface WalletState {
   address: string;
   encryptedKey: string;
   salt: string;
   isUnlocked: boolean;
-  signer: ethers.Wallet | null;
-  settlementAddress: string | null;
+  signer: ethers.AbstractSigner | null;
+  settlementAddress?: string;
 }
 
-async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+interface StoredWallet {
+  address: string;
+  encrypted_private_key: string;
+  salt: string;
+  deployed_contracts?: Record<string, string>;
+}
+
+async function deriveKey(password: string, salt: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password) as BufferSource, 'PBKDF2', false, ['deriveKey']);
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: salt as BufferSource, iterations: 100000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 150000, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
   );
 }
 
-async function encrypt(plaintext: string, key: CryptoKey): Promise<string> {
-  const enc = new TextEncoder();
+function bufToHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBuf(hex: string): Uint8Array {
+  return new Uint8Array(hex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+}
+
+async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const salt = bufToHex(saltBytes.buffer as ArrayBuffer);
+  const key = await deriveKey(password, salt);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, enc.encode(plaintext) as BufferSource);
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-  return ethers.hexlify(combined);
+  const enc = new TextEncoder();
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, key, enc.encode(privateKey));
+  return { encrypted: bufToHex(encrypted), salt };
 }
 
-async function decrypt(ciphertextHex: string, key: CryptoKey): Promise<string> {
-  const combined = ethers.getBytes(ciphertextHex);
-  const iv = combined.slice(0, 12);
-  const ciphertext = combined.slice(12);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, ciphertext as BufferSource);
-  return new TextDecoder().decode(plaintext);
-}
-
-async function relay(action: string, payload: Record<string, unknown>): Promise<any> {
-  const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-    body: JSON.stringify({ action, ...payload }),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-    throw new Error((err as any).error || `Relayer error: ${resp.status}`);
-  }
-  return resp.json();
+async function decryptPrivateKey(encryptedHex: string, salt: string, password: string): Promise<string> {
+  const key = await deriveKey(password, salt);
+  const iv = new Uint8Array(12);
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, key, hexToBuf(encryptedHex).buffer as ArrayBuffer);
+  return new TextDecoder().decode(decrypted);
 }
 
 export async function generateWallet(password: string): Promise<WalletState> {
   const wallet = ethers.Wallet.createRandom();
-  const settlement = ethers.Wallet.createRandom();
-  const saltBytes = ethers.randomBytes(16);
-  const salt = ethers.hexlify(saltBytes);
-  const encKey = await deriveKey(password, saltBytes);
-  const encrypted = await encrypt(wallet.privateKey, encKey);
-  await relay('db_insert', {
-    table: 'arb_wallet',
-    data: {
-      address: wallet.address, encrypted_private_key: encrypted, salt,
-      deployed_contracts: {}, settlement_address: settlement.address,
-      settlement_encrypted_key: await encrypt(settlement.privateKey, encKey),
-    },
-  });
-  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(wallet.privateKey), settlementAddress: settlement.address };
+  const { encrypted, salt } = await encryptPrivateKey(wallet.privateKey, password);
+
+  if (supabase) {
+    await supabase.from('arb_wallet').insert({
+      address: wallet.address,
+      encrypted_private_key: encrypted,
+      salt,
+      deployed_contracts: {},
+    });
+  }
+
+  return {
+    address: wallet.address,
+    encryptedKey: encrypted,
+    salt,
+    isUnlocked: true,
+    signer: wallet,
+    settlementAddress: wallet.address,
+  };
 }
 
 export async function importWallet(privateKey: string, password: string): Promise<WalletState> {
   const wallet = new ethers.Wallet(privateKey);
-  const settlement = ethers.Wallet.createRandom();
-  const saltBytes = ethers.randomBytes(16);
-  const salt = ethers.hexlify(saltBytes);
-  const encKey = await deriveKey(password, saltBytes);
-  const encrypted = await encrypt(privateKey, encKey);
-  await relay('db_insert', {
-    table: 'arb_wallet',
-    data: {
-      address: wallet.address, encrypted_private_key: encrypted, salt,
-      deployed_contracts: {}, settlement_address: settlement.address,
-      settlement_encrypted_key: await encrypt(settlement.privateKey, encKey),
-    },
-  });
-  return { address: wallet.address, encryptedKey: encrypted, salt, isUnlocked: true, signer: new ethers.Wallet(privateKey), settlementAddress: settlement.address };
+  const { encrypted, salt } = await encryptPrivateKey(privateKey, password);
+
+  if (supabase) {
+    await supabase.from('arb_wallet').insert({
+      address: wallet.address,
+      encrypted_private_key: encrypted,
+      salt,
+      deployed_contracts: {},
+    });
+  }
+
+  return {
+    address: wallet.address,
+    encryptedKey: encrypted,
+    salt,
+    isUnlocked: true,
+    signer: wallet,
+    settlementAddress: wallet.address,
+  };
+}
+
+export async function loadWallet(): Promise<WalletState | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.from('arb_wallet').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (!data) return null;
+  const stored = data as StoredWallet;
+  return {
+    address: stored.address,
+    encryptedKey: stored.encrypted_private_key,
+    salt: stored.salt,
+    isUnlocked: false,
+    signer: null,
+    settlementAddress: stored.deployed_contracts ? undefined : stored.address,
+  };
 }
 
 export async function unlockWallet(encryptedKey: string, salt: string, password: string): Promise<WalletState> {
-  const saltBytes = ethers.getBytes(salt);
-  const encKey = await deriveKey(password, saltBytes);
-  const privateKey = await decrypt(encryptedKey, encKey);
+  const privateKey = await decryptPrivateKey(encryptedKey, salt, password);
   const wallet = new ethers.Wallet(privateKey);
-  let settlementAddress: string | null = null;
-  try {
-    const result = await relay('db_select', { table: 'arb_wallet', filter: { address: wallet.address }, limit: 1 });
-    settlementAddress = result.data?.[0]?.settlement_address ?? null;
-  } catch { /* non-fatal */ }
-  return { address: wallet.address, encryptedKey, salt, isUnlocked: true, signer: wallet, settlementAddress };
-}
-
-export async function loadWallet(): Promise<{ address: string; encryptedKey: string; salt: string; settlementAddress: string | null } | null> {
-  try {
-    const result = await relay('db_select', { table: 'arb_wallet', order: 'created_at.desc', limit: 1 });
-    if (!result.data?.length) return null;
-    const w = result.data[0];
-    return { address: w.address, encryptedKey: w.encrypted_private_key, salt: w.salt, settlementAddress: w.settlement_address ?? null };
-  } catch { return null; }
+  return {
+    address: wallet.address,
+    encryptedKey,
+    salt,
+    isUnlocked: true,
+    signer: wallet,
+  };
 }
 
 export async function updateDeployedContracts(address: string, contracts: Record<string, string>): Promise<void> {
-  await relay('db_update', { table: 'arb_wallet', filter: { address }, data: { deployed_contracts: contracts } });
+  if (!supabase) return;
+  await supabase.from('arb_wallet').update({ deployed_contracts: contracts }).eq('address', address);
 }

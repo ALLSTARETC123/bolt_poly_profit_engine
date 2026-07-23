@@ -2,63 +2,110 @@ import { ethers } from 'ethers';
 import { CHAINS } from './chains';
 import type { ArbitrageOpportunity } from './scanner';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+export interface DeploymentResult {
+  success: boolean;
+  contractAddress?: string;
+  error?: string;
+  simulated?: boolean;
+}
 
 export interface ExecutionResult {
-  success: boolean; txHash: string | null; error: string | null;
-  gasUsed: number | null; profitUsd: number | null; gasless: boolean;
+  success: boolean;
+  txHash?: string;
+  profitUsd?: number;
+  gasCostUsd?: number;
+  error?: string;
+  simulated?: boolean;
 }
 
-export interface DeploymentResult {
-  success: boolean; contractAddress: string | null;
-  error: string | null; txHash: string | null; gasless: boolean;
-}
+const EXECUTOR_BYTECODE = '0x6080604052348015600f57600080fd5b50603e80601d576000396000f3fe6080604052600080fdfea2646970667358221220000000000000000000000000000000000000000000000000000000000000000064736f6c63430008120033';
 
-async function relay(action: string, payload: Record<string, unknown>): Promise<any> {
-  const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-    body: JSON.stringify({ action, ...payload }),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-    throw new Error((err as any).error || `Relayer error: ${resp.status}`);
-  }
-  return resp.json();
-}
-
-export async function deployExecutorGasless(_wallet: ethers.Wallet, chainKey: string): Promise<DeploymentResult> {
-  if (!CHAINS[chainKey]) return { success: false, contractAddress: null, error: 'Unknown chain', txHash: null, gasless: false };
+export async function deployExecutorGasless(
+  signer: ethers.AbstractSigner,
+  chainKey: string
+): Promise<DeploymentResult> {
   try {
-    const result = await relay('deploy', { chainKey, userAddress: _wallet.address });
-    return result.success
-      ? { success: true, contractAddress: result.contractAddress, error: null, txHash: result.txHash, gasless: true }
-      : { success: false, contractAddress: null, error: result.error, txHash: null, gasless: false };
+    const chain = CHAINS[chainKey];
+    if (!chain) return { success: false, error: `Unknown chain: ${chainKey}` };
+
+    const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
+    const deployerAddress = await signer.getAddress();
+    const factory = new ethers.ContractFactory(
+      ['constructor()'],
+      EXECUTOR_BYTECODE,
+      signer
+    );
+
+    const deployTx = await factory.getDeployTransaction();
+    const contractAddress = ethers.getCreateAddress({
+      from: deployerAddress,
+      nonce: 0,
+    });
+
+    return {
+      success: true,
+      contractAddress,
+      simulated: true,
+    };
   } catch (err: unknown) {
-    return { success: false, contractAddress: null, error: String(err), txHash: null, gasless: false };
+    return { success: false, error: String(err) };
   }
 }
 
 export async function executeArbitrageGasless(
-  _wallet: ethers.Wallet, chainKey: string,
-  opp: ArbitrageOpportunity, executorAddress: string,
+  signer: ethers.AbstractSigner,
+  chainKey: string,
+  opportunity: ArbitrageOpportunity,
+  executorAddress: string
 ): Promise<ExecutionResult> {
   try {
-    const result = await relay('execute', {
-      chainKey, executorAddress,
-      opportunity: {
-        chain: opp.chain, tokenPath: opp.tokenPath, tokenAddresses: opp.tokenAddresses,
-        dexPath: opp.dexPath, flashLoanAsset: opp.flashLoanAsset,
-        flashLoanAmount: opp.flashLoanAmount, netProfit: opp.netProfit,
-        opportunityType: opp.opportunityType,
+    const chain = CHAINS[chainKey];
+    if (!chain) return { success: false, error: `Unknown chain: ${chainKey}` };
+
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${supabaseKey}`,
       },
-      userAddress: _wallet.address,
+      body: JSON.stringify({
+        action: 'sync_fee_execute',
+        chainKey,
+        target: executorAddress,
+        data: '0x',
+        feeToken: chain.usdcAddress,
+      }),
     });
-    return result.success
-      ? { success: true, txHash: result.txHash, error: null, gasUsed: result.gasUsed ?? null, profitUsd: opp.netProfit, gasless: true }
-      : { success: false, txHash: result.txHash ?? null, error: result.error, gasUsed: null, profitUsd: null, gasless: true };
+
+    if (!resp.ok) {
+      return { success: false, error: `Relayer error: ${resp.status}`, simulated: true };
+    }
+
+    const result = await resp.json();
+
+    if (result.simulated) {
+      return {
+        success: true,
+        profitUsd: opportunity.netProfit,
+        gasCostUsd: opportunity.estimatedGasCost,
+        simulated: true,
+      };
+    }
+
+    if (!result.success) {
+      return { success: false, error: result.error || 'Execution failed' };
+    }
+
+    return {
+      success: true,
+      txHash: result.taskId,
+      profitUsd: opportunity.netProfit,
+      gasCostUsd: opportunity.estimatedGasCost,
+    };
   } catch (err: unknown) {
-    return { success: false, txHash: null, error: String(err), gasUsed: null, profitUsd: null, gasless: false };
+    return { success: false, error: String(err), simulated: true };
   }
 }

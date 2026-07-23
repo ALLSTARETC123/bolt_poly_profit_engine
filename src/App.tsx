@@ -63,14 +63,14 @@ export default function App() {
         try {
           const { data: td } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
           if (td) {
-            const profit = (td as any[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(String(t.amount_usd || '0')), 0);
+            const profit = (td as { type: string; amount_usd: string }[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
             setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
       }
 
       try {
-        const resp = await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+        const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
           body: JSON.stringify({ action: 'health' }),
@@ -149,16 +149,10 @@ export default function App() {
       setAllOpportunities(opps);
       if (opps.length > 0) {
         try {
-          await fetch(`${supabaseUrl}/functions/v1/relayer`, {
+          await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-            body: JSON.stringify({ action: 'db_insert', table: 'arb_opportunities', data: opps.map(o => ({
-              chain: o.chain, opportunity_type: o.opportunityType, token_path: o.tokenPath, dex_path: o.dexPath,
-              flash_loan_asset: o.flashLoanAsset, flash_loan_amount: o.flashLoanAmount,
-              estimated_profit: o.estimatedProfit, estimated_gas_cost: o.estimatedGasCost,
-              net_profit: o.netProfit, profit_margin_pct: o.profitMarginPct,
-              confidence_score: o.confidenceScore, block_number: o.blockNumber, executed: false,
-            })) }),
+            body: JSON.stringify({ action: 'save_operator_config', key: 'last_scan', value: { count: opps.length, timestamp: Date.now() } }),
           });
         } catch { /* non-fatal */ }
       }
@@ -206,8 +200,8 @@ export default function App() {
           <div className="flex items-center gap-3">
             {relayerMode && (
               <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'syncfee' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                <span className="text-xs text-emerald-300">{relayerMode === 'syncfee' ? 'SyncFee Live' : 'Simulation'}</span>
+                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                <span className="text-xs text-emerald-300">{relayerMode === 'live' ? 'SyncFee Live' : 'Simulation'}</span>
               </div>
             )}
             {wallet && (
@@ -278,7 +272,7 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gas Mode" value={relayerMode === 'syncfee' ? 'SYNCFEE' : 'SIMULATION'} color={relayerMode === 'syncfee' ? 'emerald' : 'amber'} />
+                <StatusItem label="Gas Mode" value={relayerMode === 'live' ? 'SYNCFEE' : 'SIMULATION'} color={relayerMode === 'live' ? 'emerald' : 'amber'} />
                 <StatusItem label="Scan Rate" value={`${SCAN_INTERVAL_MS / 1000}s`} color="cyan" />
               </div>
             </div>
@@ -437,7 +431,7 @@ export default function App() {
                 <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 3: Add API Key to Supabase</p><p className="text-xs">Set GELATO_API_KEY as an edge function secret. App switches from simulation to live SyncFee execution.</p></div></div>
                 <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 4: Start Engine</p><p className="text-xs">Scanner finds arb, Gelato relays it, fee is deducted from the profit itself. Zero upfront capital.</p></div></div>
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Current Status: {relayerMode === 'syncfee' ? <span className="text-emerald-400">SyncFee Live — fee paid from profit, zero deposit</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live (free, no deposit)</span>}</p>
+                  <p className="text-xs text-slate-500">Current Status: {relayerMode === 'live' ? <span className="text-emerald-400">SyncFee Live — fee paid from profit, zero deposit</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live (free, no deposit)</span>}</p>
                 </div>
               </div>
             </div>
