@@ -34,10 +34,14 @@ function hexToBuf(hex: string): Uint8Array {
   return new Uint8Array(hex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
 }
 
+function toBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer;
+}
+
 async function deriveKey(password: string, saltHex: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
   const saltBytes = hexToBuf(saltHex);
-  const saltBuffer = saltBytes.buffer.slice(0, saltBytes.byteLength) as ArrayBuffer;
+  const saltBuffer = toBuffer(saltBytes);
   const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt: saltBuffer, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
@@ -50,10 +54,10 @@ async function deriveKey(password: string, saltHex: string): Promise<CryptoKey> 
 
 async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
   const saltBytes = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
-  const saltHex = bufToHex(saltBytes.buffer as ArrayBuffer);
+  const saltHex = bufToHex(toBuffer(saltBytes));
   const key = await deriveKey(password, saltHex);
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-  const ivBuffer = iv.buffer.slice(0, iv.byteLength) as ArrayBuffer;
+  const ivBuffer = toBuffer(iv);
   const enc = new TextEncoder();
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: ivBuffer },
@@ -73,9 +77,9 @@ async function decryptPrivateKey(encryptedHex: string, saltHex: string, password
   const ctHex = encryptedHex.slice(IV_LENGTH * 2);
   const key = await deriveKey(password, saltHex);
   const iv = hexToBuf(ivHex);
-  const ivBuffer = iv.buffer.slice(0, iv.byteLength) as ArrayBuffer;
+  const ivBuffer = toBuffer(iv);
   const ctBytes = hexToBuf(ctHex);
-  const ctBuffer = ctBytes.buffer.slice(0, ctBytes.byteLength) as ArrayBuffer;
+  const ctBuffer = toBuffer(ctBytes);
   const decrypted = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: ivBuffer },
     key,

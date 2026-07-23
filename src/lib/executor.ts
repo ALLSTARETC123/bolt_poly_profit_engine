@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { CHAINS, CHAIN_KEYS } from './chains';
+import { CHAINS } from './chains';
 import type { ArbitrageOpportunity } from './scanner';
 
 export interface DeploymentResult {

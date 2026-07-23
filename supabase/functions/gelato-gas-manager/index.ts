@@ -6,10 +6,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const GELATO_API_KEY = Deno.env.get("GELATO_API_KEY") || "";
-
 const GELATO_RELAY_URL = "https://relay.gelato.network";
 const GELATO_API_BASE = "https://api.gelato.network";
 
@@ -27,21 +24,11 @@ const FEE_TOKENS: Record<string, string> = {
   base: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 };
 
-const FLASH_LOAN_PROVIDERS: Record<string, { name: string; address: string; feeBps: number }> = {
-  balancer: { name: "Balancer", address: "0xBA12222222228d8Ba445958a75a0704d566BF2C8", feeBps: 0 },
-  aave: { name: "Aave V3", address: "0x794a61358D6845594F94dc1DB02A252b5b4814aD", feeBps: 5 },
-  uniswap: { name: "Uniswap V3", address: "0x1F98431c8aD98523631AE4a59f267346ea31F984", feeBps: 30 },
-};
-
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-function jsonError(msg: string, status = 500) {
-  return json({ error: msg }, status);
 }
 
 function isHexString(str: string): boolean {
@@ -50,7 +37,7 @@ function isHexString(str: string): boolean {
 
 function validateChainKey(chainKey: unknown): string | null {
   if (typeof chainKey !== "string") return null;
-  if (!CHAIN_IDS.hasOwnProperty(chainKey)) return null;
+  if (!Object.prototype.hasOwnProperty.call(CHAIN_IDS, chainKey)) return null;
   return chainKey;
 }
 
@@ -132,25 +119,20 @@ Deno.serve(async (req: Request) => {
         gelatoConfigured: !!GELATO_API_KEY,
         mode: GELATO_API_KEY ? "live" : "not_configured",
         supportedChains: Object.keys(CHAIN_IDS),
-        flashLoanProviders: Object.keys(FLASH_LOAN_PROVIDERS),
       });
-    }
-
-    if (action === "list_flash_loan_providers") {
-      return json({ providers: FLASH_LOAN_PROVIDERS });
     }
 
     if (action === "sync_fee_execute") {
       const { chainKey, target, data: calldata, feeToken: customFeeToken } = body;
       const validChain = validateChainKey(chainKey);
-      if (!validChain) return jsonError("Invalid or missing chainKey", 400);
+      if (!validChain) return json({ error: "Invalid or missing chainKey" }, 400);
       const validTarget = validateAddress(target);
-      if (!validTarget) return jsonError("Invalid or missing target address", 400);
+      if (!validTarget) return json({ error: "Invalid or missing target address" }, 400);
       if (typeof calldata !== "string" || !isHexString(calldata)) {
-        return jsonError("Invalid calldata (must be hex string)", 400);
+        return json({ error: "Invalid calldata (must be hex string)" }, 400);
       }
       const feeToken = customFeeToken || FEE_TOKENS[validChain];
-      if (!feeToken) return jsonError(`No fee token for chain: ${validChain}`, 400);
+      if (!feeToken) return json({ error: `No fee token for chain: ${validChain}` }, 400);
 
       try {
         const result = await callWithSyncFee(validChain, validTarget, calldata, feeToken);
@@ -160,15 +142,15 @@ Deno.serve(async (req: Request) => {
 
     if (action === "get_task_status") {
       const validTaskId = validateTaskId(body.taskId);
-      if (!validTaskId) return jsonError("Invalid or missing taskId", 400);
+      if (!validTaskId) return json({ error: "Invalid or missing taskId" }, 400);
       try {
         const result = await getTaskStatus(validTaskId);
         return json(result);
       } catch (e) { return json({ success: false, error: String(e) }, 500); }
     }
 
-    return jsonError(`Unknown action: ${String(action)}`, 400);
+    return json({ error: `Unknown action: ${String(action)}` }, 400);
   } catch (err: unknown) {
-    return jsonError(String(err));
+    return json({ error: String(err) }, 500);
   }
 });
