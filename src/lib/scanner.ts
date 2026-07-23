@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import { CHAINS, CHAIN_KEYS } from './chains';
 
 export interface ArbitrageOpportunity {
@@ -25,17 +26,20 @@ export interface ScanResult {
 
 const DEX_NAMES = ['Uniswap V3', 'SushiSwap', 'QuickSwap', 'Balancer', 'Curve'];
 
-function seededRandom(seed: number): () => number {
-  let s = seed;
-  return () => {
-    s = (s * 9301 + 49297) % 233280;
-    return s / 233280;
-  };
+async function getBlockNumber(chainKey: string): Promise<number> {
+  const chain = CHAINS[chainKey];
+  const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
+  return await provider.getBlockNumber();
 }
 
 function generateOpportunities(chainKey: string, blockNumber: number): ArbitrageOpportunity[] {
   const chain = CHAINS[chainKey];
-  const rng = seededRandom(blockNumber + chain.chainId);
+  const seed = blockNumber + chain.chainId;
+  let s = seed;
+  const rng = () => {
+    s = (s * 9301 + 49297) % 233280;
+    return s / 233280;
+  };
   const count = Math.floor(rng() * 4);
   const opps: ArbitrageOpportunity[] = [];
 
@@ -78,7 +82,7 @@ export async function scanAllChains(): Promise<ScanResult[]> {
   for (const chainKey of CHAIN_KEYS) {
     const start = Date.now();
     try {
-      const blockNumber = Math.floor(Date.now() / 1000) + CHAINS[chainKey].chainId;
+      const blockNumber = await getBlockNumber(chainKey);
       const opportunities = generateOpportunities(chainKey, blockNumber);
       results.push({
         chain: chainKey,

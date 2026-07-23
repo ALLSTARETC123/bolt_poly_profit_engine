@@ -4,10 +4,11 @@ import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, CheckCircle, AlertTriangle, Clock,
   Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Rocket, Zap,
+  ExternalLink, Key, Copy,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
 import { scanAllChains, type ArbitrageOpportunity, type ScanResult } from './lib/scanner';
-import { deployExecutorGasless, executeArbitrageGasless, type DeploymentResult, type ExecutionResult } from './lib/executor';
+import { deployExecutorGasless, executeArbitrageGasless, getTaskStatus, type DeploymentResult, type ExecutionResult } from './lib/executor';
 import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, type WalletState } from './lib/wallet';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
@@ -40,7 +41,7 @@ export default function App() {
   const [scanCount, setScanCount] = useState(0);
   const [totalProfit, setTotalProfit] = useState(0);
   const [executedCount, setExecutedCount] = useState(0);
-  const [relayerMode, setRelayerMode] = useState<string | null>(null);
+  const [gelatoStatus, setGelatoStatus] = useState<{ configured: boolean; mode: string } | null>(null);
 
   const scanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -63,7 +64,7 @@ export default function App() {
         try {
           const { data: td } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
           if (td) {
-            const profit = (td as { type: string; amount_usd: string }[]).filter(t => t.type === 'profit' || t.type === 'simulated_profit').reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
+            const profit = (td as { type: string; amount_usd: string }[]).filter(t => t.type === 'profit' || t.type === 'syncfee_executed').reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
             setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
@@ -75,8 +76,15 @@ export default function App() {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
           body: JSON.stringify({ action: 'health' }),
         });
-        setRelayerMode(resp.ok ? (await resp.json()).mode : 'simulation');
-      } catch { setRelayerMode('simulation'); }
+        if (resp.ok) {
+          const health = await resp.json();
+          setGelatoStatus({ configured: health.gelatoConfigured, mode: health.mode });
+        } else {
+          setGelatoStatus({ configured: false, mode: 'not_configured' });
+        }
+      } catch {
+        setGelatoStatus({ configured: false, mode: 'not_configured' });
+      }
     })();
   }, []);
 
@@ -112,8 +120,10 @@ export default function App() {
 
   const handleOneClickStart = async () => {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
+
     setDeploying(true);
-    pushAlert('info', 'Computing executor addresses (zero gas)...');
+    pushAlert('info', 'Computing executor contract addresses...');
+
     for (const chainKey of CHAIN_KEYS) {
       if (!deployedContracts[chainKey]) {
         const result: DeploymentResult = await deployExecutorGasless(wallet.signer!, chainKey);
@@ -121,12 +131,13 @@ export default function App() {
           const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}`);
+          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}: ${result.contractAddress.slice(0, 10)}...`);
         } else {
-          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name}: ${result.error?.slice(0, 80)}`);
+          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name} failed: ${result.error?.slice(0, 80)}`);
         }
       }
     }
+
     setDeploying(false);
     setEngineRunning(true);
     pushAlert('success', `Engine started — scanning every ${SCAN_INTERVAL_MS / 1000}s`);
@@ -147,18 +158,12 @@ export default function App() {
       setScanResults(results);
       const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
       setAllOpportunities(opps);
-      if (opps.length > 0) {
-        try {
-          await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
-            body: JSON.stringify({ action: 'save_operator_config', key: 'last_scan', value: { count: opps.length, timestamp: Date.now() } }),
-          });
-        } catch { /* non-fatal */ }
-      }
+
       if (autoExecute && wallet?.signer) {
         const min = parseFloat(minProfit) || 0.10;
-        for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) { await executeOpportunity(opp); }
+        for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) {
+          await executeOpportunity(opp);
+        }
       }
     } catch (err: unknown) { pushAlert('error', `Scan failed: ${String(err).slice(0, 100)}`); }
   };
@@ -167,13 +172,27 @@ export default function App() {
     if (!wallet?.signer) { pushAlert('error', 'Unlock wallet to execute'); return; }
     const executorAddress = deployedContracts[opp.chain];
     if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
+
     setExecuting(true);
     pushAlert('info', `Executing arb on ${opp.chain} (${opp.opportunityType})...`);
+
     const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress);
+
     if (result.success) {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
-      pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)}`);
+      pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (task: ${result.taskId?.slice(0, 12) || 'pending'}...)`);
+
+      if (result.taskId) {
+        setTimeout(async () => {
+          const status = await getTaskStatus(result.taskId!);
+          if (status.success && status.transactionHash) {
+            pushAlert('success', `Confirmed on ${opp.chain}: tx ${status.transactionHash.slice(0, 20)}...`);
+          } else if (status.success && status.taskState) {
+            pushAlert('info', `Task ${result.taskId?.slice(0, 12)}... state: ${status.taskState}`);
+          }
+        }, 15000);
+      }
     } else {
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
     }
@@ -181,6 +200,7 @@ export default function App() {
   };
 
   const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
+  const copyToClipboard = (text: string) => { navigator.clipboard.writeText(text); pushAlert('info', 'Copied to clipboard'); };
 
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-200">
@@ -198,10 +218,12 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {relayerMode && (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/50 border border-emerald-800/50">
-                <div className={`w-1.5 h-1.5 rounded-full ${relayerMode === 'live' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                <span className="text-xs text-emerald-300">{relayerMode === 'live' ? 'SyncFee Live' : 'Simulation'}</span>
+            {gelatoStatus && (
+              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${gelatoStatus.configured ? 'bg-emerald-950/50 border-emerald-800/50' : 'bg-amber-950/50 border-amber-800/50'}">
+                <div className={`w-1.5 h-1.5 rounded-full ${gelatoStatus.configured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                <span className={`text-xs ${gelatoStatus.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  {gelatoStatus.configured ? 'SyncFee Live' : 'Gelato Key Needed'}
+                </span>
               </div>
             )}
             {wallet && (
@@ -272,7 +294,7 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
-                <StatusItem label="Gas Mode" value={relayerMode === 'live' ? 'SYNCFEE' : 'SIMULATION'} color={relayerMode === 'live' ? 'emerald' : 'amber'} />
+                <StatusItem label="Gas Mode" value={gelatoStatus?.configured ? 'SYNCFEE LIVE' : 'KEY NEEDED'} color={gelatoStatus?.configured ? 'emerald' : 'amber'} />
                 <StatusItem label="Scan Rate" value={`${SCAN_INTERVAL_MS / 1000}s`} color="cyan" />
               </div>
             </div>
@@ -331,7 +353,7 @@ export default function App() {
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management</h3>
               {!walletLoaded ? <p className="text-sm text-slate-500">Loading...</p> : !wallet ? (
                 <div className="space-y-4">
-                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM. A system-generated settlement wallet is created automatically — profits flow there, transferable later.</p>
+                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM and stored in Supabase. A settlement wallet is created automatically — profits flow there, transferable later.</p>
                   <div className="space-y-3">
                     <div className="relative">
                       <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
@@ -402,12 +424,12 @@ export default function App() {
         )}
 
         {activeTab === 'settings' && (
-          <div className="max-w-lg space-y-4">
+          <div className="max-w-2xl space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Settings className="w-4 h-4 text-cyan-400" /> Engine Settings</h3>
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <div><p className="text-sm font-medium text-slate-300">Auto-Execute</p><p className="text-xs text-slate-500">Automatically execute profitable opportunities</p></div>
+                  <div><p className="text-sm font-medium text-slate-300">Auto-Execute</p><p className="text-xs text-slate-500">Automatically execute profitable opportunities via Gelato</p></div>
                   <button onClick={() => setAutoExecute(!autoExecute)} className={`w-12 h-6 rounded-full transition-colors ${autoExecute ? 'bg-emerald-600' : 'bg-slate-700'}`}>
                     <div className={`w-5 h-5 rounded-full bg-white transition-transform ${autoExecute ? 'translate-x-6' : 'translate-x-0.5'}`} />
                   </button>
@@ -423,38 +445,87 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Zap className="w-4 h-4 text-emerald-400" /> Zero-Capital Launch Path</h3>
-              <div className="space-y-3 text-sm text-slate-400">
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 1: Create Gelato Account (Free)</p><p className="text-xs">Go to app.gelato.network, sign up. No credit card, no deposit.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 2: Get Your API Key (Free)</p><p className="text-xs">Navigate to Relay, create an app, copy your sponsor API key. No payment needed for callWithSyncFee mode.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 3: Add API Key to Supabase</p><p className="text-xs">Set GELATO_API_KEY as an edge function secret. App switches from simulation to live SyncFee execution.</p></div></div>
-                <div className="flex items-start gap-2"><CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" /><div><p className="font-medium text-slate-300">Step 4: Start Engine</p><p className="text-xs">Scanner finds arb, Gelato relays it, fee is deducted from the profit itself. Zero upfront capital.</p></div></div>
-                <div className="mt-3 p-3 bg-slate-800/50 rounded-lg">
-                  <p className="text-xs text-slate-500">Current Status: {relayerMode === 'live' ? <span className="text-emerald-400">SyncFee Live — fee paid from profit, zero deposit</span> : <span className="text-amber-400">Simulation Mode — add GELATO_API_KEY to go live (free, no deposit)</span>}</p>
+            {/* GELATO API KEY INSTRUCTIONS */}
+            <div className="bg-slate-900/50 rounded-xl border border-amber-800/40 p-6">
+              <h3 className="text-sm font-semibold text-amber-300 mb-4 flex items-center gap-2">
+                <Key className="w-4 h-4 text-amber-400" /> Gelato API Key — Required for Live Execution
+              </h3>
+
+              <div className={`mb-4 p-3 rounded-lg border ${gelatoStatus?.configured ? 'bg-emerald-950/30 border-emerald-800/40' : 'bg-amber-950/30 border-amber-800/40'}`}>
+                <p className={`text-sm flex items-center gap-2 ${gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  {gelatoStatus?.configured ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+                  {gelatoStatus?.configured
+                    ? 'Gelato API key is configured. Live SyncFee execution is active.'
+                    : 'Gelato API key is NOT configured. You must add one before the engine can execute real transactions.'}
+                </p>
+              </div>
+
+              <div className="space-y-4 text-sm text-slate-400">
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2">Step 1: Create a Gelato Account (Free, no credit card)</p>
+                  <p className="text-xs mb-2">Go to the Gelato app and sign up with your wallet or email:</p>
+                  <a href="https://app.gelato.network" target="_blank" rel="noopener noreferrer"
+                     className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-xs">
+                    <ExternalLink className="w-3 h-3" /> https://app.gelato.network
+                  </a>
                 </div>
-              </div>
-            </div>
 
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Fuel className="w-4 h-4 text-amber-400" /> How callWithSyncFee Works (Zero Deposit)</h3>
-              <div className="space-y-2 text-sm text-slate-400">
-                {['Scanner finds profitable arbitrage opportunity','Gelato relays the transaction to the executor contract','Contract takes Balancer 0% flash loan (no collateral)','Arb executes, profit is generated in USDC','Contract pays Gelato\'s fee from the profit (callWithSyncFee)','Remaining profit goes to your settlement wallet'].map((step, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs"><span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white">{i+1}</span><span>{step}</span></div>
-                ))}
-                <p className="text-xs text-emerald-300 mt-2 pl-7">No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.</p>
-              </div>
-            </div>
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2">Step 2: Get Your API Key</p>
+                  <p className="text-xs space-y-1">
+                    <span className="block">1. After signing in, click on <strong className="text-slate-200">"Relay"</strong> in the left sidebar</span>
+                    <span className="block">2. Click <strong className="text-slate-200">"Create App"</strong> and give it a name (e.g. "FlashArb")</span>
+                    <span className="block">3. Select the chains you want: Polygon, Arbitrum, Optimism, Base</span>
+                    <span className="block">4. Copy the <strong className="text-slate-200">Sponsor API Key</strong> — this is the key you need</span>
+                  </p>
+                </div>
 
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> MEV Protection</h3>
-              <div className="space-y-2 text-sm text-slate-400">
-                <p>Transactions routed through Gelato's private mempool to protect against:</p>
-                <ul className="space-y-1 ml-4">
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks</li>
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks</li>
-                  <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots</li>
-                </ul>
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2">Step 3: Add the Key to This Project</p>
+                  <p className="text-xs mb-2">The key is already set as the <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">GELATO_API_KEY</code> edge function secret. If you need to update it, run this in your terminal:</p>
+                  <div className="relative">
+                    <code className="block bg-slate-900 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">npx supabase secrets set GELATO_API_KEY=your_key_here</code>
+                    <button onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')} className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-xs mt-2 text-slate-500">Or in the Supabase Dashboard: Project Settings &gt; Edge Functions &gt; Secrets &gt; Add secret with name <code className="text-emerald-300">GELATO_API_KEY</code></p>
+                </div>
+
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2">Step 4: Start the Engine</p>
+                  <p className="text-xs">Once the key is set, click "Start Engine" on the dashboard. The scanner finds arbitrage opportunities, Gelato relays them via <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">callWithSyncFee</code>, and the fee is deducted from the profit itself — zero upfront capital required.</p>
+                </div>
+
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2">How callWithSyncFee Works (Zero Deposit)</p>
+                  <div className="space-y-1.5 mt-2">
+                    {[
+                      'Scanner finds a profitable arbitrage opportunity',
+                      'Gelato relays the transaction to your executor contract',
+                      'Contract takes a Balancer 0% flash loan (no collateral)',
+                      'Arbitrage executes, profit is generated in USDC',
+                      'Contract pays Gelato\'s relay fee from the profit itself',
+                      'Remaining profit goes to your settlement wallet',
+                    ].map((step, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white flex-shrink-0">{i+1}</span>
+                        <span>{step}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-emerald-300 mt-2 pl-7">No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.</p>
+                </div>
+
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="font-semibold text-slate-300 mb-2 flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> MEV Protection</p>
+                  <p className="text-xs mb-2">Transactions routed through Gelato's private mempool to protect against:</p>
+                  <ul className="space-y-1 ml-4 text-xs">
+                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots</li>
+                  </ul>
+                </div>
               </div>
             </div>
 

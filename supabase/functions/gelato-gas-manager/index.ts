@@ -47,28 +47,17 @@ function jsonError(msg: string, status = 500) {
   return json({ error: msg }, status);
 }
 
-async function getGelatoApiKey(): Promise<string | null> {
-  if (GELATO_API_KEY) return GELATO_API_KEY;
-  try {
-    const { data } = await supabase
-      .from("operator_config")
-      .select("value")
-      .eq("key", "gelato_api_key")
-      .maybeSingle();
-    return (data?.value as { key?: string })?.key ?? null;
-  } catch {
-    return null;
+function requireGelatoKey(): string {
+  if (!GELATO_API_KEY) {
+    throw new Error("GELATO_API_KEY is not configured. Add it as an edge function secret: npx supabase secrets set GELATO_API_KEY=your_key");
   }
+  return GELATO_API_KEY;
 }
 
 async function callWithSyncFee(chainKey: string, target: string, data: string, feeToken: string) {
-  const apiKey = await getGelatoApiKey();
-  if (!apiKey) {
-    return { success: false, simulated: true, error: "No GELATO_API_KEY configured — running in simulation mode" };
-  }
-
+  const apiKey = requireGelatoKey();
   const chainId = CHAIN_IDS[chainKey];
-  if (!chainId) return { success: false, simulated: false, error: `Unsupported chain: ${chainKey}` };
+  if (!chainId) throw new Error(`Unsupported chain: ${chainKey}`);
 
   const resp = await fetch(`${GELATO_RELAY_URL}/callWithSyncFee`, {
     method: "POST",
@@ -87,21 +76,17 @@ async function callWithSyncFee(chainKey: string, target: string, data: string, f
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
-    return { success: false, simulated: false, error: `Gelato callWithSyncFee failed: ${(err as { message?: string }).message || resp.statusText}` };
+    throw new Error(`Gelato callWithSyncFee failed (${resp.status}): ${(err as { message?: string }).message || resp.statusText}`);
   }
 
   const result = await resp.json();
-  return { success: true, simulated: false, taskId: result.taskId || result.id, txHash: result.txHash ?? null };
+  return { success: true, taskId: result.taskId || result.id, txHash: result.txHash ?? null };
 }
 
 async function sponsorCall(chainKey: string, target: string, data: string, sponsorApiKey?: string) {
-  const apiKey = sponsorApiKey || (await getGelatoApiKey());
-  if (!apiKey) {
-    return { success: false, simulated: true, error: "No GELATO_API_KEY configured — running in simulation mode" };
-  }
-
+  const apiKey = sponsorApiKey || requireGelatoKey();
   const chainId = CHAIN_IDS[chainKey];
-  if (!chainId) return { success: false, simulated: false, error: `Unsupported chain: ${chainKey}` };
+  if (!chainId) throw new Error(`Unsupported chain: ${chainKey}`);
 
   const resp = await fetch(`${GELATO_RELAY_URL}/relayWithSponsoredCall`, {
     method: "POST",
@@ -119,22 +104,21 @@ async function sponsorCall(chainKey: string, target: string, data: string, spons
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
-    return { success: false, simulated: false, error: `Gelato sponsored call failed: ${(err as { message?: string }).message || resp.statusText}` };
+    throw new Error(`Gelato sponsored call failed (${resp.status}): ${(err as { message?: string }).message || resp.statusText}`);
   }
 
   const result = await resp.json();
-  return { success: true, simulated: false, taskId: result.taskId || result.id };
+  return { success: true, taskId: result.taskId || result.id };
 }
 
 async function getTaskStatus(taskId: string) {
-  const apiKey = await getGelatoApiKey();
-  if (!apiKey) return { success: false, error: "No GELATO_API_KEY configured" };
+  const apiKey = requireGelatoKey();
 
   const resp = await fetch(`${GELATO_API_BASE}/tasks/${taskId}`, {
     headers: { "Authorization": `Bearer ${apiKey}` },
   });
 
-  if (!resp.ok) return { success: false, error: `Gelato API error: ${resp.statusText}` };
+  if (!resp.ok) throw new Error(`Gelato API error: ${resp.statusText}`);
 
   const result = await resp.json();
   return {
@@ -153,11 +137,9 @@ async function getTaskStatus(taskId: string) {
 }
 
 async function getEstimatedFee(chainKey: string, gasLimit: number, feeToken: string) {
-  const apiKey = await getGelatoApiKey();
-  if (!apiKey) return { success: false, simulated: true, error: "No GELATO_API_KEY configured" };
-
+  const apiKey = requireGelatoKey();
   const chainId = CHAIN_IDS[chainKey];
-  if (!chainId) return { success: false, error: `Unsupported chain: ${chainKey}` };
+  if (!chainId) throw new Error(`Unsupported chain: ${chainKey}`);
 
   const resp = await fetch(`${GELATO_API_BASE}/oracles/${chainId}/estimate`, {
     method: "POST",
@@ -168,7 +150,7 @@ async function getEstimatedFee(chainKey: string, gasLimit: number, feeToken: str
     body: JSON.stringify({ gasLimit, feeToken }),
   });
 
-  if (!resp.ok) return { success: false, error: `Gelato estimate failed: ${resp.statusText}` };
+  if (!resp.ok) throw new Error(`Gelato estimate failed: ${resp.statusText}`);
 
   const result = await resp.json();
   return { success: true, estimatedFee: result.estimatedFee, feeToken, gasLimit, chainId };
@@ -176,11 +158,11 @@ async function getEstimatedFee(chainKey: string, gasLimit: number, feeToken: str
 
 function getFlashLoanProvider(providerKey: string) {
   const provider = FLASH_LOAN_PROVIDERS[providerKey.toLowerCase()];
-  if (!provider) return { success: false, error: `Unknown flash loan provider: ${providerKey}` };
-  return { success: true, ...provider };
+  if (!provider) throw new Error(`Unknown flash loan provider: ${providerKey}`);
+  return provider;
 }
 
-async function saveGasRecord(chainKey: string, taskId: string | null, type: string, amountUsd: number, _txHash: string | null) {
+async function saveGasRecord(chainKey: string, type: string, amountUsd: number) {
   try {
     await supabase.from("arb_treasury").insert({
       type,
@@ -200,11 +182,10 @@ Deno.serve(async (req: Request) => {
     const { action } = body;
 
     if (action === "health") {
-      const hasKey = !!(await getGelatoApiKey());
       return json({
         status: "ok",
-        gelatoConfigured: hasKey,
-        mode: hasKey ? "live" : "simulation",
+        gelatoConfigured: !!GELATO_API_KEY,
+        mode: GELATO_API_KEY ? "live" : "not_configured",
         supportedChains: Object.keys(CHAIN_IDS),
         flashLoanProviders: Object.keys(FLASH_LOAN_PROVIDERS),
       });
@@ -212,10 +193,11 @@ Deno.serve(async (req: Request) => {
 
     if (action === "get_flash_loan_provider") {
       const { provider } = body;
-      const result = getFlashLoanProvider(provider);
-      if (!result.success) return jsonError((result as { error: string }).error, 400);
-      const { success, ...data } = result;
-      return json(data);
+      if (!provider) return jsonError("Missing required field: provider", 400);
+      try {
+        const p = getFlashLoanProvider(provider);
+        return json(p);
+      } catch (e) { return jsonError(String(e), 400); }
     }
 
     if (action === "list_flash_loan_providers") {
@@ -228,33 +210,31 @@ Deno.serve(async (req: Request) => {
       const feeToken = customFeeToken || FEE_TOKENS[chainKey];
       if (!feeToken) return jsonError(`No fee token configured for chain: ${chainKey}`, 400);
 
-      const result = await callWithSyncFee(chainKey, target, calldata, feeToken);
-
-      if (result.success) {
-        await saveGasRecord(chainKey, (result as { taskId: string }).taskId, "syncfee_executed", 0, null);
-      }
-
-      return json(result);
+      try {
+        const result = await callWithSyncFee(chainKey, target, calldata, feeToken);
+        await saveGasRecord(chainKey, "syncfee_executed", 0);
+        return json(result);
+      } catch (e) { return json({ success: false, error: String(e) }, 500); }
     }
 
     if (action === "sponsored_execute") {
       const { chainKey, target, data: calldata, sponsorApiKey } = body;
       if (!chainKey || !target || !calldata) return jsonError("Missing required fields: chainKey, target, data", 400);
 
-      const result = await sponsorCall(chainKey, target, calldata, sponsorApiKey);
-
-      if (result.success) {
-        await saveGasRecord(chainKey, (result as { taskId: string }).taskId, "sponsored_executed", 0, null);
-      }
-
-      return json(result);
+      try {
+        const result = await sponsorCall(chainKey, target, calldata, sponsorApiKey);
+        await saveGasRecord(chainKey, "sponsored_executed", 0);
+        return json(result);
+      } catch (e) { return json({ success: false, error: String(e) }, 500); }
     }
 
     if (action === "get_task_status") {
       const { taskId } = body;
       if (!taskId) return jsonError("Missing required field: taskId", 400);
-      const result = await getTaskStatus(taskId);
-      return json(result);
+      try {
+        const result = await getTaskStatus(taskId);
+        return json(result);
+      } catch (e) { return json({ success: false, error: String(e) }, 500); }
     }
 
     if (action === "estimate_fee") {
@@ -262,8 +242,10 @@ Deno.serve(async (req: Request) => {
       if (!chainKey || !gasLimit) return jsonError("Missing required fields: chainKey, gasLimit", 400);
       const feeToken = customFeeToken || FEE_TOKENS[chainKey];
       if (!feeToken) return jsonError(`No fee token configured for chain: ${chainKey}`, 400);
-      const result = await getEstimatedFee(chainKey, gasLimit, feeToken);
-      return json(result);
+      try {
+        const result = await getEstimatedFee(chainKey, gasLimit, feeToken);
+        return json(result);
+      } catch (e) { return json({ success: false, error: String(e) }, 500); }
     }
 
     if (action === "save_operator_config") {

@@ -30,7 +30,7 @@ Deno.serve(async (req: Request) => {
     const { action } = body;
 
     if (action === "health") {
-      return json({ status: "ok", mode: GELATO_API_KEY ? "live" : "simulation" });
+      return json({ status: "ok", gelatoConfigured: !!GELATO_API_KEY });
     }
 
     if (action === "db_insert") {
