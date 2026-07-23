@@ -45,6 +45,7 @@ const V3_QUOTER_ABI = [
       { name: 'tokenIn', type: 'address' },
       { name: 'tokenOut', type: 'address' },
       { name: 'fee', type: 'uint24' },
+      { name: 'amountIn', type: 'uint256' },
       { name: 'sqrtPriceLimitX96', type: 'uint160' },
     ],
     name: 'quoteExactInputSingle',
@@ -75,25 +76,40 @@ const ERC20_DECIMALS_ABI = [
 const DEX_NAMES_V2 = ['sushi', 'quickswap'];
 
 const SAMPLE_AMOUNT_USD = 1000;
+const RPC_TIMEOUT_MS = 8000;
 
 const TOKEN_PRICE_USD: Record<string, number> = {
-  WETH: 3200,
-  USDC: 1,
-  USDT: 1,
-  DAI: 1,
-  WBTC: 62000,
-  WMATIC: 0.8,
+  WETH: 3200, USDC: 1, USDT: 1, DAI: 1, WBTC: 62000, WMATIC: 0.8,
 };
 
 function getProvider(chainKey: string): ethers.JsonRpcProvider {
-  return new ethers.JsonRpcProvider(CHAINS[chainKey].rpcUrl);
+  const chain = CHAINS[chainKey];
+  return new ethers.JsonRpcProvider(chain.rpcUrl, {
+    chainId: chain.chainId,
+    name: chain.name,
+    ensAddress: undefined,
+  }, {
+    staticNetwork: true,
+    batchStallTime: 0,
+  });
+}
+
+function isZeroAddress(addr: string): boolean {
+  return !addr || addr === '0x0000000000000000000000000000000000000000';
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
 }
 
 async function getTokenDecimals(provider: ethers.JsonRpcProvider, tokenAddress: string): Promise<number> {
-  if (tokenAddress === '0x0000000000000000000000000000000000000000') return 18;
+  if (isZeroAddress(tokenAddress)) return 18;
   try {
     const contract = new ethers.Contract(tokenAddress, ERC20_DECIMALS_ABI, provider);
-    const decimals = await contract.decimals();
+    const decimals = await withTimeout(contract.decimals(), RPC_TIMEOUT_MS);
     return Number(decimals);
   } catch {
     return 18;
@@ -118,10 +134,13 @@ async function fetchV3Quote(
   amountIn: bigint
 ): Promise<bigint | null> {
   const chain = CHAINS[chainKey];
-  if (!chain.uniswapV3Quoter || chain.uniswapV3Quoter === '0x') return null;
+  if (isZeroAddress(chain.uniswapV3Quoter)) return null;
   try {
     const quoter = new ethers.Contract(chain.uniswapV3Quoter, V3_QUOTER_ABI, provider);
-    const amountOut = await quoter.quoteExactInputSingle.staticCall(tokenIn, tokenOut, fee, amountIn, 0);
+    const amountOut = await withTimeout(
+      quoter.quoteExactInputSingle.staticCall(tokenIn, tokenOut, fee, amountIn, 0),
+      RPC_TIMEOUT_MS
+    );
     return amountOut as bigint;
   } catch {
     return null;
@@ -135,10 +154,10 @@ async function fetchV2Quote(
   tokenOut: string,
   amountIn: bigint
 ): Promise<bigint | null> {
-  if (!routerAddress || routerAddress === '0x0000000000000000000000000000000000000000') return null;
+  if (isZeroAddress(routerAddress)) return null;
   try {
     const router = new ethers.Contract(routerAddress, V2_ROUTER_ABI, provider);
-    const amounts = await router.getAmountsOut(amountIn, [tokenIn, tokenOut]);
+    const amounts = await withTimeout(router.getAmountsOut(amountIn, [tokenIn, tokenOut]), RPC_TIMEOUT_MS);
     return amounts[1] as bigint;
   } catch {
     return null;
@@ -148,15 +167,13 @@ async function fetchV2Quote(
 async function scanChainPrices(chainKey: string): Promise<{ prices: PoolPrice[]; blockNumber: number; scanTimeMs: number }> {
   const start = Date.now();
   const provider = getProvider(chainKey);
-  const blockNumber = await provider.getBlockNumber();
+  const blockNumber = await withTimeout(provider.getBlockNumber(), RPC_TIMEOUT_MS);
   const prices: PoolPrice[] = [];
 
   for (const [tokenInSym, tokenOutSym] of TOKEN_PAIRS) {
     const tokenIn = getTokenAddress(chainKey, tokenInSym);
     const tokenOut = getTokenAddress(chainKey, tokenOutSym);
-    if (!tokenIn || !tokenOut) continue;
-    if (tokenIn === '0x0000000000000000000000000000000000000000') continue;
-    if (tokenOut === '0x0000000000000000000000000000000000000000') continue;
+    if (isZeroAddress(tokenIn) || isZeroAddress(tokenOut)) continue;
 
     const decimalsIn = await getTokenDecimals(provider, tokenIn);
     const decimalsOut = await getTokenDecimals(provider, tokenOut);
