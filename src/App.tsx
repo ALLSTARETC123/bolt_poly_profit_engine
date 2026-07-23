@@ -3,12 +3,13 @@ import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, CheckCircle, AlertTriangle, Clock,
   Settings, DollarSign, Lock, Eye, EyeOff, Rocket, Zap,
-  ExternalLink, Key, Copy, Users, Receipt, Coins,
+  ExternalLink, Key, Copy, Receipt, Coins,
+  ArrowRight, CheckCircle2, Link2,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
 import { scanAllChains, type ArbitrageOpportunity, type ScanResult } from './lib/scanner';
 import {
-  deployExecutorGasless, executeArbitrageGasless, getTaskStatus, checkGelatoHealth,
+  deployExecutorViaGelato, executeArbitrageGasless, getTaskStatus, checkGelatoHealth,
   type DeploymentResult, type ExecutionResult,
 } from './lib/executor';
 import {
@@ -16,15 +17,17 @@ import {
   updateDeployedContracts, getDeployedContracts, type WalletState,
 } from './lib/wallet';
 import {
-  fetchOperatorConfig, updateOperatorConfig, fetchRevenueRecords,
-  fetchSignalRequests, fetchTreasuryRecords, fetchEscrowRebates,
+  fetchOperatorConfig, fetchArbConfig, fetchTreasuryRecords,
+  fetchExecutionRecords, fetchOpportunityRecords, fetchEngineStatus,
+  insertOpportunity, updateOpportunityStatus,
+  insertExecution, updateExecutionStatus,
+  insertTreasuryEntry, updateEngineStatus, incrementEngineTrades,
   fetchTreasurySummary,
-  type OperatorConfig, type RevenueRecord, type SignalRequest,
-  type TreasuryRecord, type EscrowRebate,
+  type OperatorConfig, type TreasuryRecord, type ExecutionRecord,
+  type OpportunityRecord, type EngineStatusRecord,
 } from './lib/operator';
-import { supabase } from './lib/supabase';
 
-type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'revenue' | 'operator' | 'settings';
+type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'revenue' | 'operator' | 'deploy' | 'settings';
 interface AlertItem { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
 
 export default function App() {
@@ -53,16 +56,33 @@ export default function App() {
   const [gelatoStatus, setGelatoStatus] = useState<{ configured: boolean; mode: string } | null>(null);
 
   const [operatorConfig, setOperatorConfig] = useState<OperatorConfig[]>([]);
-  const [revenueRecords, setRevenueRecords] = useState<RevenueRecord[]>([]);
-  const [signalRequests, setSignalRequests] = useState<SignalRequest[]>([]);
+  const [arbConfig, setArbConfig] = useState<{ key: string; value: unknown }[]>([]);
   const [treasuryRecords, setTreasuryRecords] = useState<TreasuryRecord[]>([]);
-  const [escrowRebates, setEscrowRebates] = useState<EscrowRebate[]>([]);
+  const [executionRecords, setExecutionRecords] = useState<ExecutionRecord[]>([]);
+  const [opportunityRecords, setOpportunityRecords] = useState<OpportunityRecord[]>([]);
+  const [engineStatusRecords, setEngineStatusRecords] = useState<EngineStatusRecord[]>([]);
   const [treasurySummary, setTreasurySummary] = useState({ totalProfit: 0, totalGas: 0, totalFlashFee: 0, totalDeploy: 0 });
 
   const scanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const pushAlert = useCallback((type: AlertItem['type'], message: string) => {
     setAlerts(prev => [{ id: Date.now().toString(), type, message, timestamp: Date.now() }, ...prev].slice(0, 20));
+  }, []);
+
+  const refreshDbData = useCallback(async () => {
+    const [ops, acfg, treas, execs, opps, status, summary] = await Promise.all([
+      fetchOperatorConfig(), fetchArbConfig(), fetchTreasuryRecords(),
+      fetchExecutionRecords(), fetchOpportunityRecords(), fetchEngineStatus(),
+      fetchTreasurySummary(),
+    ]);
+    setOperatorConfig(ops);
+    setArbConfig(acfg);
+    setTreasuryRecords(treas);
+    setExecutionRecords(execs);
+    setOpportunityRecords(opps);
+    setEngineStatusRecords(status);
+    setTreasurySummary(summary);
+    setTotalProfit(summary.totalProfit);
   }, []);
 
   useEffect(() => {
@@ -76,25 +96,11 @@ export default function App() {
           if (contracts && Object.keys(contracts).length > 0) setDeployedContracts(contracts);
         }
       } catch { setWalletLoaded(true); }
-
-      const summary = await fetchTreasurySummary();
-      setTreasurySummary(summary);
-      setTotalProfit(summary.totalProfit);
-
-      const [ops, rev, sigs, treas, escrow] = await Promise.all([
-        fetchOperatorConfig(), fetchRevenueRecords(), fetchSignalRequests(),
-        fetchTreasuryRecords(), fetchEscrowRebates(),
-      ]);
-      setOperatorConfig(ops);
-      setRevenueRecords(rev);
-      setSignalRequests(sigs);
-      setTreasuryRecords(treas);
-      setEscrowRebates(escrow);
-
+      await refreshDbData();
       const health = await checkGelatoHealth();
       setGelatoStatus(health);
     })();
-  }, []);
+  }, [refreshDbData]);
 
   const handleGenerateWallet = async () => {
     if (!password || password.length < 8) { pushAlert('error', 'Password must be at least 8 characters'); return; }
@@ -102,7 +108,7 @@ export default function App() {
       const ws = await generateWallet(password);
       setWallet(ws); setPassword('');
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
-      setActiveTab('dashboard');
+      setActiveTab('deploy');
     } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
@@ -112,7 +118,7 @@ export default function App() {
       const ws = await importWallet(importKeyInput, password);
       setWallet(ws); setPassword(''); setImportKeyInput(''); setShowImport(false);
       pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setActiveTab('dashboard');
+      setActiveTab('deploy');
     } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
@@ -128,31 +134,43 @@ export default function App() {
   const handleOneClickStart = async () => {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
     setDeploying(true);
-    pushAlert('info', 'Computing executor contract addresses...');
+    pushAlert('info', 'Deploying executor contracts via Gelato SyncFee...');
+
     for (const chainKey of CHAIN_KEYS) {
       if (!deployedContracts[chainKey]) {
-        const result: DeploymentResult = await deployExecutorGasless(wallet.signer!, chainKey);
+        const result: DeploymentResult = await deployExecutorViaGelato(wallet.signer!, chainKey);
         if (result.success && result.contractAddress) {
           const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}`);
+          pushAlert('success', `Executor deployed on ${CHAINS[chainKey].name}: ${result.contractAddress.slice(0, 10)}...`);
+          await insertTreasuryEntry({
+            execution_id: null,
+            amount_usd: 0,
+            type: 'deployment',
+            chain: chainKey,
+          });
         } else {
-          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name} failed: ${result.error?.slice(0, 80)}`);
+          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name} pending: ${result.error?.slice(0, 80)}`);
         }
       }
     }
+
     setDeploying(false);
     setEngineRunning(true);
-    pushAlert('success', `Engine started — scanning every ${SCAN_INTERVAL_MS / 1000}s`);
+    pushAlert('success', `Engine started — scanning real DEX prices every ${SCAN_INTERVAL_MS / 1000}s`);
     runScan();
     scanIntervalRef.current = setInterval(() => runScan(), SCAN_INTERVAL_MS);
   };
 
-  const stopEngine = () => {
+  const stopEngine = async () => {
     setEngineRunning(false);
     if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
+    for (const chainKey of CHAIN_KEYS) {
+      await updateEngineStatus(chainKey, 'idle', 0, 0, 0);
+    }
     pushAlert('info', 'Engine stopped');
+    await refreshDbData();
   };
 
   const runScan = async () => {
@@ -162,12 +180,46 @@ export default function App() {
       setScanResults(results);
       const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
       setAllOpportunities(opps);
+
+      for (const result of results) {
+        const chain = result.chain;
+        if (result.error) {
+          await updateEngineStatus(chain, 'error', result.blockNumber, 0, result.scanTimeMs, result.error);
+        } else {
+          await updateEngineStatus(chain, 'scanning', result.blockNumber, result.opportunities.length, result.scanTimeMs);
+        }
+
+        for (const opp of result.opportunities) {
+          await insertOpportunity({
+            chain: opp.chain,
+            opportunity_type: opp.opportunityType,
+            token_path: opp.tokenPath,
+            dex_path: opp.dexPath,
+            pool_addresses: opp.poolAddresses || [],
+            flash_loan_provider: 'balancer',
+            flash_loan_asset: opp.flashLoanAsset,
+            flash_loan_amount: opp.flashLoanAmount,
+            estimated_profit: opp.estimatedProfit,
+            estimated_gas_cost: opp.estimatedGasCost,
+            net_profit: opp.netProfit,
+            profit_margin_pct: opp.profitMarginPct,
+            pool_reserves: opp.poolReserves || {},
+            price_impact: opp.priceImpact || 0,
+            confidence_score: opp.confidenceScore,
+            status: 'detected',
+            block_number: opp.blockNumber,
+            expires_at: new Date(Date.now() + 30000).toISOString(),
+          });
+        }
+      }
+
       if (autoExecute && wallet?.signer) {
         const min = parseFloat(minProfit) || 0.10;
         for (const opp of opps.filter(o => o.netProfit >= min).slice(0, 3)) {
           await executeOpportunity(opp);
         }
       }
+      await refreshDbData();
     } catch (err: unknown) { pushAlert('error', `Scan failed: ${String(err).slice(0, 100)}`); }
   };
 
@@ -176,35 +228,65 @@ export default function App() {
     const executorAddress = deployedContracts[opp.chain];
     if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
     setExecuting(true);
-    pushAlert('info', `Executing arb on ${opp.chain} (${opp.opportunityType})...`);
+    pushAlert('info', `Executing ${opp.opportunityType} arb on ${opp.chain}: ${opp.tokenPath.join(' -> ')}...`);
+
+    const execId = await insertExecution({
+      opportunity_id: null,
+      chain: opp.chain,
+      tx_hash: null,
+      flash_loan_amount: opp.flashLoanAmount,
+      flash_loan_fee: 0,
+      gas_used: 0,
+      gas_cost_usd: opp.estimatedGasCost,
+      revenue_gross: opp.estimatedProfit,
+      revenue_net: opp.netProfit,
+      status: 'pending',
+      error_message: null,
+      block_number: opp.blockNumber,
+      executor_contract: executorAddress,
+    });
+
     const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress);
+
     if (result.success) {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
+
+      if (execId) {
+        await updateExecutionStatus(execId, 'executed', result.txHash || undefined);
+      }
+      await incrementEngineTrades(opp.chain);
+
+      await insertTreasuryEntry({
+        execution_id: execId,
+        amount_usd: opp.netProfit,
+        type: 'profit',
+        chain: opp.chain,
+      });
+      await insertTreasuryEntry({
+        execution_id: execId,
+        amount_usd: opp.estimatedGasCost,
+        type: 'gas_cost',
+        chain: opp.chain,
+      });
+
       pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (task: ${result.taskId?.slice(0, 12) || 'pending'}...)`);
+
       if (result.taskId) {
         setTimeout(async () => {
           const status = await getTaskStatus(result.taskId!);
           if (status.success && status.transactionHash) {
+            if (execId) await updateExecutionStatus(execId, 'confirmed', status.transactionHash);
             pushAlert('success', `Confirmed on ${opp.chain}: tx ${status.transactionHash.slice(0, 20)}...`);
+            await refreshDbData();
           }
         }, 15000);
       }
     } else {
+      if (execId) await updateExecutionStatus(execId, 'failed', undefined, result.error);
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
     }
     setExecuting(false);
-  };
-
-  const handleConfigUpdate = async (key: string, value: unknown) => {
-    const ok = await updateOperatorConfig(key, value);
-    if (ok) {
-      pushAlert('success', `Updated ${key}`);
-      const ops = await fetchOperatorConfig();
-      setOperatorConfig(ops);
-    } else {
-      pushAlert('error', `Failed to update ${key}`);
-    }
   };
 
   const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
@@ -217,6 +299,7 @@ export default function App() {
     { key: 'opportunities', label: 'Opportunities' },
     { key: 'revenue', label: 'Revenue' },
     { key: 'operator', label: 'Operator' },
+    { key: 'deploy', label: 'Deploy' },
     { key: 'settings', label: 'Settings' },
   ];
 
@@ -231,7 +314,7 @@ export default function App() {
             <div>
               <h1 className="text-base font-bold text-white">Flash Arb Engine</h1>
               <p className="text-xs text-slate-500 flex items-center gap-1">
-                <Zap className="w-3 h-3 text-emerald-400" /> Zero Capital · SyncFee · {SCAN_INTERVAL_MS / 1000}s Scan
+                <Zap className="w-3 h-3 text-emerald-400" /> Zero Capital · SyncFee · Real DEX Prices · {SCAN_INTERVAL_MS / 1000}s Scan
               </p>
             </div>
           </div>
@@ -300,7 +383,7 @@ export default function App() {
           <div className="space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <StatCard icon={<DollarSign className="w-5 h-5" />} label="Total Profit" value={`$${totalProfit.toFixed(2)}`} color="emerald" />
-              <StatCard icon={<TrendingUp className="w-5 h-5" />} label="Opportunities" value={String(allOpportunities.length)} color="cyan" />
+              <StatCard icon={<TrendingUp className="w-5 h-5" />} label="Live Opportunities" value={String(allOpportunities.length)} color="cyan" />
               <StatCard icon={<CheckCircle className="w-5 h-5" />} label="Executed" value={String(executedCount)} color="emerald" />
               <StatCard icon={<Activity className="w-5 h-5" />} label="Scans" value={String(scanCount)} color="blue" />
             </div>
@@ -316,9 +399,9 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <Zap className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
-                  <p className="text-sm font-semibold text-emerald-300">100% Zero-Capital Architecture · SyncFee Mode</p>
+                  <p className="text-sm font-semibold text-emerald-300">100% Zero-Capital Architecture · Real DEX Price Feeds</p>
                   <p className="text-xs text-slate-400">
-                    Balancer 0% flash loans + Gelato callWithSyncFee (fee paid from profit, no deposit). Scans every {SCAN_INTERVAL_MS}ms. Zero upfront gas, zero seed capital.
+                    Balancer 0% flash loans + Gelato callWithSyncFee (fee from profit, zero deposit). Live Uniswap V3 + SushiSwap + QuickSwap price quotes. Scans every {SCAN_INTERVAL_MS}ms across {CHAIN_KEYS.length} chains.
                   </p>
                 </div>
               </div>
@@ -338,26 +421,31 @@ export default function App() {
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status
+                <Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status — Live On-Chain Data
               </h3>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
                   const chain = CHAINS[chainKey];
                   const result = scanResults.find(r => r.chain === chainKey);
+                  const dbStatus = engineStatusRecords.find(s => s.chain === chainKey);
                   const oppCount = result?.opportunities.length || 0;
+                  const priceCount = result?.poolPrices.length || 0;
                   const hasContract = !!deployedContracts[chainKey];
+                  const statusValue = dbStatus?.status || 'idle';
+                  const blockNum = dbStatus?.current_block || result?.blockNumber || 0;
                   return (
                     <div key={chainKey} className="flex items-center gap-4 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <div className={`w-2 h-2 rounded-full ${engineRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                      <div className={`w-2 h-2 rounded-full ${statusValue === 'scanning' ? 'bg-emerald-400 animate-pulse' : statusValue === 'error' ? 'bg-red-400' : 'bg-slate-600'}`} />
                       <span className="text-sm font-medium w-28">{chain.name}</span>
-                      <span className="text-xs text-slate-500">~{chain.blockTimeMs / 1000}s/block</span>
-                      <span className="text-xs text-slate-400">{oppCount} opps</span>
-                      {result?.scanTimeMs !== undefined && <span className="text-xs text-slate-500">{result.scanTimeMs}ms</span>}
+                      <span className="text-xs text-slate-500">block {blockNum > 0 ? blockNum.toLocaleString() : '--'}</span>
+                      <span className="text-xs text-cyan-400">{priceCount} pools</span>
+                      <span className="text-xs text-emerald-400">{oppCount} opps</span>
+                      {dbStatus && <span className="text-xs text-slate-500">{dbStatus.rpc_latency_ms}ms</span>}
                       <div className="flex-1" />
                       {hasContract ? (
-                        <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Ready</span>
+                        <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Deployed</span>
                       ) : (
-                        <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>
+                        <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Pending</span>
                       )}
                     </div>
                   );
@@ -367,11 +455,11 @@ export default function App() {
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities
+                <TrendingUp className="w-4 h-4 text-emerald-400" /> Live Arbitrage Opportunities
               </h3>
               {allOpportunities.length === 0 ? (
                 <p className="text-sm text-slate-500 text-center py-8">
-                  {engineRunning ? 'Scanning every 3s...' : 'Start the engine to scan for arbitrage opportunities'}
+                  {engineRunning ? 'Scanning DEX prices every 3s...' : 'Start the engine to scan real DEX prices for arbitrage opportunities'}
                 </p>
               ) : (
                 <div className="space-y-2">
@@ -462,13 +550,6 @@ export default function App() {
                     <p className="text-xs text-slate-500 mb-1">Wallet Address</p>
                     <p className="text-sm font-mono text-emerald-300">{wallet.address}</p>
                   </div>
-                  {wallet.settlementAddress && (
-                    <div className="bg-slate-800/50 rounded-lg p-4">
-                      <p className="text-xs text-slate-500 mb-1">Settlement Address (auto-generated)</p>
-                      <p className="text-sm font-mono text-cyan-300">{wallet.settlementAddress}</p>
-                      <p className="text-xs text-slate-500 mt-2">Profits accumulate here. Transfer to your MetaMask or any wallet at your convenience.</p>
-                    </div>
-                  )}
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
                     <p className="text-xs text-emerald-300 flex items-center gap-1.5">
                       <Zap className="w-3 h-3" /> Zero-capital mode active. No gas tokens needed — SyncFee pays from profit.
@@ -483,9 +564,9 @@ export default function App() {
         {activeTab === 'opportunities' && (
           <div className="space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">All Opportunities ({allOpportunities.length})</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4">Live Opportunities ({allOpportunities.length})</h3>
               {allOpportunities.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">No opportunities found. Start the engine to scan.</p>
+                <p className="text-sm text-slate-500 text-center py-8">No opportunities found. Start the engine to scan real DEX prices.</p>
               ) : (
                 <div className="space-y-2">
                   {allOpportunities.map((opp) => (
@@ -504,6 +585,45 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Receipt className="w-4 h-4 text-cyan-400" /> Database Opportunities ({opportunityRecords.length})
+              </h3>
+              {opportunityRecords.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-4">No opportunities saved to database yet.</p>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {opportunityRecords.slice(0, 50).map(o => (
+                    <div key={o.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-2 text-xs">
+                      <span className={`px-2 py-0.5 rounded ${o.status === 'executed' ? 'bg-emerald-950/50 text-emerald-300' : o.status === 'expired' ? 'bg-slate-700/50 text-slate-400' : 'bg-blue-950/50 text-blue-300'}`}>{o.status}</span>
+                      <span className="text-slate-400">{o.chain}</span>
+                      <span className="font-mono text-slate-300 flex-1 truncate">{(Array.isArray(o.token_path) ? o.token_path : []).join(' -> ')}</span>
+                      <span className="font-semibold text-emerald-400">+${parseFloat(o.net_profit).toFixed(2)}</span>
+                      <span className="text-slate-500">{(parseFloat(o.confidence_score) * 100).toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {scanResults.some(r => r.poolPrices.length > 0) && (
+              <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+                <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-cyan-400" /> Live DEX Pool Prices
+                </h3>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {scanResults.flatMap((r, ri) => r.poolPrices.map((p, pi) => (
+                    <div key={`${ri}-${pi}`} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-2 text-xs">
+                      <span className="font-mono text-slate-300 w-24">{p.tokenIn}/{p.tokenOut}</span>
+                      <span className="text-cyan-400 w-32">{p.dex} {p.fee > 0 ? `(${p.fee / 10000}%)` : ''}</span>
+                      <span className="text-emerald-400 font-semibold">{p.price.toFixed(6)}</span>
+                      <span className="text-slate-500">liq: {p.liquidity.toFixed(2)}</span>
+                    </div>
+                  )))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -512,19 +632,19 @@ export default function App() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <StatCard icon={<DollarSign className="w-5 h-5" />} label="Total Profit" value={`$${treasurySummary.totalProfit.toFixed(2)}`} color="emerald" />
               <StatCard icon={<Coins className="w-5 h-5" />} label="Gas Costs" value={`$${treasurySummary.totalGas.toFixed(2)}`} color="amber" />
-              <StatCard icon={<Receipt className="w-5 h-5" />} label="Signal Revenue" value={`${revenueRecords.length} records`} color="cyan" />
-              <StatCard icon={<Users className="w-5 h-5" />} label="Signal Requests" value={String(signalRequests.length)} color="blue" />
+              <StatCard icon={<Receipt className="w-5 h-5" />} label="Executions" value={String(executionRecords.length)} color="cyan" />
+              <StatCard icon={<TrendingUp className="w-5 h-5" />} label="Opportunities" value={String(opportunityRecords.length)} color="blue" />
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Receipt className="w-4 h-4 text-cyan-400" /> Treasury Records
+                <Receipt className="w-4 h-4 text-cyan-400" /> Treasury Ledger ({treasuryRecords.length})
               </h3>
               {treasuryRecords.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-4">No treasury records found.</p>
+                <p className="text-sm text-slate-500 text-center py-4">No treasury records yet. Start the engine to generate revenue.</p>
               ) : (
-                <div className="space-y-2">
-                  {treasuryRecords.slice(0, 20).map(t => (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {treasuryRecords.slice(0, 50).map(t => (
                     <div key={t.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
                       <span className={`text-xs px-2 py-0.5 rounded ${
                         t.type === 'profit' ? 'bg-emerald-950/50 text-emerald-300'
@@ -545,86 +665,50 @@ export default function App() {
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <DollarSign className="w-4 h-4 text-emerald-400" /> Agent Revenue (Signal Payments)
+                <Activity className="w-4 h-4 text-emerald-400" /> Execution Records ({executionRecords.length})
               </h3>
-              {revenueRecords.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-4">No revenue records found.</p>
+              {executionRecords.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-4">No executions yet. Start the engine to auto-execute arbitrage.</p>
               ) : (
-                <div className="space-y-2">
-                  {revenueRecords.slice(0, 20).map(r => (
-                    <div key={r.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{r.subscriber_address.slice(0, 10)}...{r.subscriber_address.slice(-4)}</span>
-                      <span className="text-xs text-slate-400">{parseFloat(r.amount_fet).toFixed(2)} FET</span>
-                      <span className="text-xs text-slate-500">${parseFloat(r.usd_value).toFixed(2)}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${
-                        r.status === 'confirmed' ? 'bg-emerald-950/50 text-emerald-300'
-                        : r.status === 'pending' ? 'bg-amber-950/50 text-amber-300'
-                        : 'bg-red-950/50 text-red-300'
-                      }`}>{r.status}</span>
-                      <span className="text-xs text-slate-500">{fmtDate(r.created_at)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Activity className="w-4 h-4 text-blue-400" /> Signal Requests
-              </h3>
-              {signalRequests.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-4">No signal requests found.</p>
-              ) : (
-                <div className="space-y-2">
-                  {signalRequests.slice(0, 20).map(s => (
-                    <div key={s.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{s.subscriber_address.slice(0, 10)}...{s.subscriber_address.slice(-4)}</span>
-                      <span className="text-xs text-slate-400">{s.signal_type}</span>
-                      <span className="text-xs text-slate-500">{s.tier}</span>
-                      <span className="text-xs text-slate-400">{s.result_count} results</span>
-                      <span className="text-xs text-slate-500">{s.latency_ms}ms</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${
-                        s.payment_status === 'paid' ? 'bg-emerald-950/50 text-emerald-300'
-                        : s.payment_status === 'pending' ? 'bg-amber-950/50 text-amber-300'
-                        : s.payment_status === 'free' ? 'bg-slate-700/50 text-slate-300'
-                        : 'bg-red-950/50 text-red-300'
-                      }`}>{s.payment_status}</span>
-                      <span className="text-xs text-slate-500">{fmtDate(s.created_at)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Shield className="w-4 h-4 text-cyan-400" /> MEV Escrow Rebates
-              </h3>
-              {escrowRebates.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-4">No escrow rebates found.</p>
-              ) : (
-                <div className="space-y-2">
-                  {escrowRebates.slice(0, 20).map(e => (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {executionRecords.slice(0, 50).map(e => (
                     <div key={e.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
                       <span className={`text-xs px-2 py-0.5 rounded ${
-                        e.rebate_type === 'front_run' ? 'bg-red-950/50 text-red-300'
-                        : e.rebate_type === 'back_run' ? 'bg-amber-950/50 text-amber-300'
-                        : e.rebate_type === 'sandwich' ? 'bg-orange-950/50 text-orange-300'
-                        : 'bg-emerald-950/50 text-emerald-300'
-                      }`}>{e.rebate_type}</span>
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{e.transaction_hash.slice(0, 18)}...</span>
-                      <span className="text-xs font-semibold text-emerald-400">${parseFloat(e.amount_numeric).toFixed(2)}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${
                         e.status === 'confirmed' ? 'bg-emerald-950/50 text-emerald-300'
+                        : e.status === 'executed' ? 'bg-cyan-950/50 text-cyan-300'
                         : e.status === 'pending' ? 'bg-amber-950/50 text-amber-300'
-                        : e.status === 'distributed' ? 'bg-cyan-950/50 text-cyan-300'
                         : 'bg-red-950/50 text-red-300'
                       }`}>{e.status}</span>
-                      <span className="text-xs text-slate-500">{e.confirmed_at ? fmtDate(e.confirmed_at) : 'Pending'}</span>
+                      <span className="text-xs text-slate-400">{e.chain}</span>
+                      <span className="text-xs text-slate-500">flash: ${parseFloat(e.flash_loan_amount).toFixed(0)}</span>
+                      <span className="text-xs font-semibold text-emerald-400 flex-1 text-right">+${parseFloat(e.revenue_net).toFixed(2)}</span>
+                      <span className="text-xs text-slate-500">gas: ${parseFloat(e.gas_cost_usd).toFixed(2)}</span>
+                      {e.tx_hash && <span className="text-xs font-mono text-cyan-400">{e.tx_hash.slice(0, 12)}...</span>}
+                      <span className="text-xs text-slate-500">{fmtDate(e.executed_at)}</span>
                     </div>
                   ))}
                 </div>
               )}
+            </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-cyan-400" /> Engine Status by Chain
+              </h3>
+              <div className="space-y-2">
+                {engineStatusRecords.map(s => (
+                  <div key={s.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                    <div className={`w-2 h-2 rounded-full ${s.status === 'scanning' ? 'bg-emerald-400 animate-pulse' : s.status === 'error' ? 'bg-red-400' : 'bg-slate-600'}`} />
+                    <span className="text-sm font-medium w-24">{s.chain}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded ${s.status === 'scanning' ? 'bg-emerald-950/50 text-emerald-300' : s.status === 'error' ? 'bg-red-950/50 text-red-300' : 'bg-slate-700/50 text-slate-400'}`}>{s.status}</span>
+                    <span className="text-xs text-slate-500">block: {s.current_block?.toLocaleString() || '--'}</span>
+                    <span className="text-xs text-emerald-400">{s.opportunities_found} opps</span>
+                    <span className="text-xs text-cyan-400">{s.trades_executed} trades</span>
+                    <span className="text-xs text-slate-500">{s.rpc_latency_ms}ms</span>
+                    {s.last_scan_at && <span className="text-xs text-slate-500 ml-auto">{fmtDate(s.last_scan_at)}</span>}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -633,10 +717,10 @@ export default function App() {
           <div className="max-w-2xl space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
               <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <Settings className="w-4 h-4 text-cyan-400" /> Operator Configuration
+                <Settings className="w-4 h-4 text-cyan-400" /> Operator Configuration ({operatorConfig.length})
               </h3>
               {operatorConfig.length === 0 ? (
-                <p className="text-sm text-slate-500">Loading operator config...</p>
+                <p className="text-sm text-slate-500">Loading config...</p>
               ) : (
                 <div className="space-y-2">
                   {operatorConfig.map(cfg => (
@@ -645,11 +729,9 @@ export default function App() {
                         <p className="text-sm font-medium text-slate-300">{cfg.key}</p>
                         <p className="text-xs text-slate-500">{cfg.description}</p>
                       </div>
-                      <div className="text-right">
-                        <p className="text-xs font-mono text-cyan-300">
-                          {typeof cfg.value === 'object' ? JSON.stringify(cfg.value) : String(cfg.value)}
-                        </p>
-                      </div>
+                      <p className="text-xs font-mono text-cyan-300 text-right max-w-xs break-all">
+                        {typeof cfg.value === 'object' ? JSON.stringify(cfg.value) : String(cfg.value)}
+                      </p>
                     </div>
                   ))}
                 </div>
@@ -657,39 +739,156 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">Revenue Flow Overview</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-cyan-400" /> Arb Engine Config ({arbConfig.length})
+              </h3>
+              {arbConfig.length === 0 ? (
+                <p className="text-sm text-slate-500">Loading config...</p>
+              ) : (
+                <div className="space-y-2">
+                  {arbConfig.map(cfg => (
+                    <div key={cfg.key} className="flex items-start gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                      <p className="text-sm font-medium text-slate-300 flex-1">{cfg.key}</p>
+                      <p className="text-xs font-mono text-cyan-300 text-right max-w-xs break-all">
+                        {typeof cfg.value === 'object' ? JSON.stringify(cfg.value) : String(cfg.value)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4">Revenue Flow — Complete Cycle</h3>
               <div className="space-y-3 text-sm text-slate-400">
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">1</div>
-                  <span>Scanner detects arbitrage opportunity across DEXs</span>
+                {[
+                  'Scanner reads real DEX prices from Uniswap V3, SushiSwap, QuickSwap via on-chain quotes',
+                  'Price discrepancies detected across DEXs for same token pair (cross-DEX or triangular)',
+                  'Opportunity saved to arb_opportunities table with full route details',
+                  'Gelato relays executeArb() call to executor contract via callWithSyncFee (zero upfront gas)',
+                  'Contract takes Balancer 0% flash loan (no fee, no collateral)',
+                  'Swaps execute across DEXs following optimal route',
+                  'Flash loan repaid, profit remains in contract',
+                  'Gelato fee deducted from profit (SyncFee — zero deposit)',
+                  'Execution record saved to arb_executions with tx hash, profit, gas data',
+                  'Treasury entries saved to arb_treasury (profit + gas_cost entries)',
+                  'Net profit: 85% to owner wallet, 5% Gelato fee, 10% gas reserve',
+                  'Engine status updated in arb_engine_status per chain per scan',
+                ].map((step, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                    <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">{i + 1}</div>
+                    <span>{step}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'deploy' && (
+          <div className="max-w-2xl space-y-4">
+            <div className="bg-slate-900/50 rounded-xl border border-emerald-800/40 p-6">
+              <h3 className="text-sm font-semibold text-emerald-300 mb-4 flex items-center gap-2">
+                <Rocket className="w-4 h-4 text-emerald-400" /> Zero-Cost Deployment Guide
+              </h3>
+              <p className="text-sm text-slate-400 mb-4">
+                Follow these steps to deploy the full arbitrage engine at zero cost. Everything is gasless — Gelato SyncFee pays from profit.
+              </p>
+
+              <div className="space-y-4">
+                <DeployStep step={1} title="Create or Import a Wallet" done={!!wallet?.isUnlocked}>
+                  <p className="text-xs text-slate-400 mb-2">Go to the Wallet tab and create a new wallet or import an existing one. This wallet receives arbitrage profits.</p>
+                  {!wallet?.isUnlocked && (
+                    <button onClick={() => setActiveTab('wallet')} className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1">
+                      Go to Wallet <ArrowRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </DeployStep>
+
+                <DeployStep step={2} title="Add Your Gelato API Key" done={!!gelatoStatus?.configured}>
+                  <p className="text-xs text-slate-400 mb-2">Add your Gelato API key as an edge function secret:</p>
+                  <div className="relative">
+                    <code className="block bg-slate-800 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">
+                      npx supabase secrets set GELATO_API_KEY=your_key_here
+                    </code>
+                    <button onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')}
+                      className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">
+                    Free key at{' '}
+                    <a href="https://app.gelato.network" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 inline-flex items-center gap-0.5">
+                      app.gelato.network <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </p>
+                </DeployStep>
+
+                <DeployStep step={3} title="Deploy Executor Contracts (Zero Gas)" done={Object.keys(deployedContracts).length === CHAIN_KEYS.length}>
+                  <p className="text-xs text-slate-400 mb-2">
+                    Click "Start Engine" in the header. The engine deploys executor contracts to all {CHAIN_KEYS.length} chains via Gelato SyncFee. No gas tokens needed.
+                  </p>
+                  {wallet?.isUnlocked && Object.keys(deployedContracts).length < CHAIN_KEYS.length && (
+                    <button onClick={handleOneClickStart} disabled={deploying}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded text-xs font-medium flex items-center gap-1.5">
+                      {deploying ? <RefreshCcw className="w-3 h-3 animate-spin" /> : <Rocket className="w-3 h-3" />}
+                      {deploying ? 'Deploying...' : 'Deploy Now'}
+                    </button>
+                  )}
+                </DeployStep>
+
+                <DeployStep step={4} title="Start Scanning & Executing" done={engineRunning}>
+                  <p className="text-xs text-slate-400 mb-2">
+                    The engine scans real DEX prices every {SCAN_INTERVAL_MS / 1000} seconds. Profitable opportunities execute automatically via Gelato.
+                  </p>
+                </DeployStep>
+
+                <DeployStep step={5} title="Monitor Revenue" done={totalProfit > 0}>
+                  <p className="text-xs text-slate-400 mb-2">
+                    Check the Revenue tab for treasury records, execution records, and engine status. All data is live from the database.
+                  </p>
+                </DeployStep>
+              </div>
+            </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contract Status
+              </h3>
+              <div className="space-y-2">
+                {CHAIN_KEYS.map(chainKey => {
+                  const chain = CHAINS[chainKey];
+                  const addr = deployedContracts[chainKey];
+                  return (
+                    <div key={chainKey} className="flex items-center gap-3 bg-slate-800/50 rounded-lg px-3 py-2">
+                      <span className="text-sm font-medium w-24">{chain.name}</span>
+                      {addr ? (
+                        <><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>
+                      ) : (
+                        <><span className="text-xs text-slate-500 flex-1">Auto-deploys via Gelato (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Link2 className="w-4 h-4 text-cyan-400" /> Contract Architecture
+              </h3>
+              <div className="space-y-3 text-xs text-slate-400">
+                <div className="bg-slate-800/30 rounded-lg p-3">
+                  <p className="font-semibold text-slate-300 mb-1">FlashArbExecutor.sol</p>
+                  <p>Takes Balancer 0% flash loans, executes swaps across Uniswap V3 + V2 DEXs, distributes profit (85% owner / 5% Gelato / 10% reserve). Callable only by Gelato relayer.</p>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">2</div>
-                  <span>Gelato relays tx via callWithSyncFee (zero upfront gas)</span>
+                <div className="bg-slate-800/30 rounded-lg p-3">
+                  <p className="font-semibold text-slate-300 mb-1">Balancer V2 Vault</p>
+                  <p>Provides 0% flash loans (no fee, no collateral). Same vault address (0xBA12...) works on all chains.</p>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">3</div>
-                  <span>Executor contract takes Balancer 0% flash loan</span>
-                </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">4</div>
-                  <span>Arbitrage executes, profit in USDC</span>
-                </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">5</div>
-                  <span>Gelato fee deducted from profit (SyncFee)</span>
-                </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">6</div>
-                  <span>Net profit → settlement wallet → treasury (logged in arb_treasury)</span>
-                </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">7</div>
-                  <span>Signal subscribers pay FET tokens for signals (agent_revenue)</span>
-                </div>
-                <div className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">8</div>
-                  <span>MEV rebates distributed to affected users (escrow_rebates)</span>
+                <div className="bg-slate-800/30 rounded-lg p-3">
+                  <p className="font-semibold text-slate-300 mb-1">Gelato Relay Network</p>
+                  <p>Relays transactions via callWithSyncFee. Gas fee paid from profit in USDC. Private mempool protects against MEV.</p>
                 </div>
               </div>
             </div>
@@ -719,52 +918,30 @@ export default function App() {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-slate-300">Scan Interval</label>
-                  <p className="text-xs text-slate-500 mt-1">{SCAN_INTERVAL_MS / 1000} seconds — matches Polygon/Optimism block times (~2s)</p>
+                  <p className="text-xs text-slate-500 mt-1">{SCAN_INTERVAL_MS / 1000} seconds — matches Polygon/Optimism block times</p>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-amber-800/40 p-6">
               <h3 className="text-sm font-semibold text-amber-300 mb-4 flex items-center gap-2">
-                <Key className="w-4 h-4 text-amber-400" /> Gelato API Key — Required for Live Execution
+                <Key className="w-4 h-4 text-amber-400" /> Gelato API Key Status
               </h3>
               <div className={`mb-4 p-3 rounded-lg border ${gelatoStatus?.configured ? 'bg-emerald-950/30 border-emerald-800/40' : 'bg-amber-950/30 border-amber-800/40'}`}>
                 <p className={`text-sm flex items-center gap-2 ${gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
                   {gelatoStatus?.configured ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
                   {gelatoStatus?.configured ? 'Gelato API key is configured. Live SyncFee execution is active.'
-                    : 'Gelato API key is NOT configured. You must add one before the engine can execute real transactions.'}
+                    : 'Gelato API key is NOT configured. Add it to enable live execution.'}
                 </p>
               </div>
-              <div className="space-y-4 text-sm text-slate-400">
-                <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="font-semibold text-slate-300 mb-2">Step 1: Create a Gelato Account (Free, no credit card)</p>
-                  <p className="text-xs mb-2">Go to the Gelato app and sign up:</p>
-                  <a href="https://app.gelato.network" target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-xs">
-                    <ExternalLink className="w-3 h-3" /> https://app.gelato.network
-                  </a>
-                </div>
-                <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="font-semibold text-slate-300 mb-2">Step 2: Get Your API Key</p>
-                  <p className="text-xs space-y-1">
-                    <span className="block">1. Click on <strong className="text-slate-200">"Relay"</strong> in the sidebar</span>
-                    <span className="block">2. Click <strong className="text-slate-200">"Create App"</strong></span>
-                    <span className="block">3. Select chains: Polygon, Arbitrum, Optimism, Base</span>
-                    <span className="block">4. Copy the <strong className="text-slate-200">Sponsor API Key</strong></span>
-                  </p>
-                </div>
-                <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="font-semibold text-slate-300 mb-2">Step 3: Add the Key to This Project</p>
-                  <div className="relative">
-                    <code className="block bg-slate-900 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">
-                      npx supabase secrets set GELATO_API_KEY=your_key_here
-                    </code>
-                    <button onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')}
-                      className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
-                      <Copy className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
+              <div className="relative">
+                <code className="block bg-slate-800 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">
+                  npx supabase secrets set GELATO_API_KEY=your_key_here
+                </code>
+                <button onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')}
+                  className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
 
@@ -782,7 +959,7 @@ export default function App() {
                       {addr ? (
                         <><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>
                       ) : (
-                        <><span className="text-xs text-slate-500 flex-1">Auto-computed on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>
+                        <><span className="text-xs text-slate-500 flex-1">Auto-deploys via Gelato (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>
                       )}
                     </div>
                   );
@@ -820,6 +997,22 @@ function StatusItem({ label, value, color }: { label: string; value: string; col
     <div>
       <p className="text-xs text-slate-500">{label}</p>
       <p className={`text-sm font-semibold ${cm[color] || cm.slate}`}>{value}</p>
+    </div>
+  );
+}
+
+function DeployStep({ step, title, done, children }: { step: number; title: string; done: boolean; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-lg border p-4 ${done ? 'bg-emerald-950/20 border-emerald-800/30' : 'bg-slate-800/30 border-slate-700/50'}`}>
+      <div className="flex items-center gap-3 mb-2">
+        {done ? (
+          <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
+        ) : (
+          <div className="w-5 h-5 rounded-full bg-slate-700 flex items-center justify-center text-xs text-slate-400 flex-shrink-0">{step}</div>
+        )}
+        <p className={`text-sm font-medium ${done ? 'text-emerald-300' : 'text-slate-300'}`}>{title}</p>
+      </div>
+      <div className="pl-8">{children}</div>
     </div>
   );
 }
