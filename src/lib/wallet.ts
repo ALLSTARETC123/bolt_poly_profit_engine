@@ -1,9 +1,5 @@
 import { ethers } from 'ethers';
-import { createClient } from '@supabase/supabase-js';
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+import { supabase } from './supabase';
 
 export interface WalletState {
   address: string;
@@ -12,13 +8,6 @@ export interface WalletState {
   isUnlocked: boolean;
   signer: ethers.AbstractSigner | null;
   settlementAddress?: string;
-}
-
-interface StoredWallet {
-  address: string;
-  encrypted_private_key: string;
-  salt: string;
-  deployed_contracts?: Record<string, string>;
 }
 
 const PBKDF2_ITERATIONS = 150000;
@@ -89,12 +78,8 @@ async function decryptPrivateKey(encryptedHex: string, saltHex: string, password
 }
 
 function validatePassword(password: string): string | null {
-  if (!password || password.length < 8) {
-    return 'Password must be at least 8 characters';
-  }
-  if (password.length > 256) {
-    return 'Password is too long';
-  }
+  if (!password || password.length < 8) return 'Password must be at least 8 characters';
+  if (password.length > 256) return 'Password is too long';
   return null;
 }
 
@@ -172,7 +157,7 @@ export async function loadWallet(): Promise<WalletState | null> {
     .maybeSingle();
   if (error) return null;
   if (!data) return null;
-  const stored = data as StoredWallet;
+  const stored = data as { address: string; encrypted_private_key: string; salt: string; deployed_contracts?: Record<string, string> };
   return {
     address: stored.address,
     encryptedKey: stored.encrypted_private_key,

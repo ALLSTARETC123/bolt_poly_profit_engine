@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { CHAINS } from './chains';
+import { supabaseUrlClean, supabaseKeyClean } from './supabase';
 import type { ArbitrageOpportunity } from './scanner';
 
 export interface DeploymentResult {
@@ -15,18 +16,6 @@ export interface ExecutionResult {
   profitUsd?: number;
   gasCostUsd?: number;
   error?: string;
-}
-
-function getSupabaseUrl(): string {
-  const url = import.meta.env.VITE_SUPABASE_URL;
-  if (!url) throw new Error('VITE_SUPABASE_URL is not configured');
-  return url;
-}
-
-function getSupabaseAnonKey(): string {
-  const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
-  if (!key) throw new Error('VITE_SUPABASE_ANON_KEY is not configured');
-  return key;
 }
 
 export async function deployExecutorGasless(
@@ -69,14 +58,11 @@ export async function executeArbitrageGasless(
       return { success: false, error: 'Invalid executor address' };
     }
 
-    const supabaseUrl = getSupabaseUrl();
-    const supabaseKey = getSupabaseAnonKey();
-
-    const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
+    const resp = await fetch(`${supabaseUrlClean}/functions/v1/gelato-gas-manager`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${supabaseKey}`,
+        Authorization: `Bearer ${supabaseKeyClean}`,
       },
       body: JSON.stringify({
         action: 'sync_fee_execute',
@@ -96,7 +82,6 @@ export async function executeArbitrageGasless(
     }
 
     const result = await resp.json();
-
     if (!result.success) {
       return { success: false, error: result.error || 'Execution failed' };
     }
@@ -119,14 +104,11 @@ export async function getTaskStatus(taskId: string): Promise<{ success: boolean;
       return { success: false, error: 'Invalid task ID' };
     }
 
-    const supabaseUrl = getSupabaseUrl();
-    const supabaseKey = getSupabaseAnonKey();
-
-    const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
+    const resp = await fetch(`${supabaseUrlClean}/functions/v1/gelato-gas-manager`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${supabaseKey}`,
+        Authorization: `Bearer ${supabaseKeyClean}`,
       },
       body: JSON.stringify({ action: 'get_task_status', taskId }),
     });
@@ -146,14 +128,11 @@ export async function getTaskStatus(taskId: string): Promise<{ success: boolean;
 
 export async function checkGelatoHealth(): Promise<{ configured: boolean; mode: string }> {
   try {
-    const supabaseUrl = getSupabaseUrl();
-    const supabaseKey = getSupabaseAnonKey();
-
-    const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
+    const resp = await fetch(`${supabaseUrlClean}/functions/v1/gelato-gas-manager`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${supabaseKey}`,
+        Authorization: `Bearer ${supabaseKeyClean}`,
       },
       body: JSON.stringify({ action: 'health' }),
     });

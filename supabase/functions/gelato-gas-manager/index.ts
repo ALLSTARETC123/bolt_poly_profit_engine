@@ -59,56 +59,36 @@ async function callWithSyncFee(chainKey: string, target: string, data: string, f
     throw new Error("GELATO_API_KEY is not configured. Add it as an edge function secret.");
   }
   const chainId = CHAIN_IDS[chainKey];
-
   const resp = await fetch(`${GELATO_RELAY_URL}/callWithSyncFee`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${GELATO_API_KEY}`,
     },
-    body: JSON.stringify({
-      chainId,
-      target,
-      data,
-      feeToken,
-      isRelayContext: true,
-    }),
+    body: JSON.stringify({ chainId, target, data, feeToken, isRelayContext: true }),
   });
-
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(`Gelato callWithSyncFee failed (${resp.status}): ${(err as { message?: string }).message || resp.statusText}`);
   }
-
   const result = await resp.json();
   return { success: true, taskId: result.taskId || result.id, txHash: result.txHash ?? null };
 }
 
 async function getTaskStatus(taskId: string) {
-  if (!GELATO_API_KEY) {
-    throw new Error("GELATO_API_KEY is not configured.");
-  }
-
+  if (!GELATO_API_KEY) throw new Error("GELATO_API_KEY is not configured.");
   const resp = await fetch(`${GELATO_API_BASE}/tasks/${taskId}`, {
     headers: { "Authorization": `Bearer ${GELATO_API_KEY}` },
   });
-
   if (!resp.ok) throw new Error(`Gelato API error: ${resp.statusText}`);
-
   const result = await resp.json();
-  return {
-    success: true,
-    taskId,
-    taskState: result.taskState,
-    transactionHash: result.transactionHash,
-  };
+  return { success: true, taskId, taskState: result.taskState, transactionHash: result.transactionHash };
 }
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
-
   try {
     const body = await req.json();
     const { action } = body;
@@ -133,7 +113,6 @@ Deno.serve(async (req: Request) => {
       }
       const feeToken = customFeeToken || FEE_TOKENS[validChain];
       if (!feeToken) return json({ error: `No fee token for chain: ${validChain}` }, 400);
-
       try {
         const result = await callWithSyncFee(validChain, validTarget, calldata, feeToken);
         return json(result);
