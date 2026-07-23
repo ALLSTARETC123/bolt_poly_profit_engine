@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-const supabase = supabaseUrl ? createClient(supabaseUrl, supabaseKey) : null;
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 export interface WalletState {
   address: string;
@@ -21,11 +21,26 @@ interface StoredWallet {
   deployed_contracts?: Record<string, string>;
 }
 
-async function deriveKey(password: string, salt: string): Promise<CryptoKey> {
+const PBKDF2_ITERATIONS = 150000;
+const IV_LENGTH = 12;
+const SALT_LENGTH = 16;
+
+function bufToHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBuf(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) throw new Error('Invalid hex string');
+  return new Uint8Array(hex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+}
+
+async function deriveKey(password: string, saltHex: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
+  const saltBytes = hexToBuf(saltHex);
+  const saltBuffer = saltBytes.buffer.slice(0, saltBytes.byteLength) as ArrayBuffer;
   const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 150000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt: saltBuffer, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
     baseKey,
     { name: 'AES-GCM', length: 256 },
     false,
@@ -33,59 +48,76 @@ async function deriveKey(password: string, salt: string): Promise<CryptoKey> {
   );
 }
 
-function bufToHex(buf: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function hexToBuf(hex: string): Uint8Array {
-  return new Uint8Array(hex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
-}
-
-/**
- * Encrypts a private key with AES-256-GCM.
- * The IV is randomly generated per encryption and prepended to the ciphertext
- * so that decryption can recover it. Format: iv(24 hex chars) + ciphertext.
- */
 async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
-  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-  const salt = bufToHex(saltBytes.buffer as ArrayBuffer);
-  const key = await deriveKey(password, salt);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const saltBytes = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
+  const saltHex = bufToHex(saltBytes.buffer as ArrayBuffer);
+  const key = await deriveKey(password, saltHex);
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const ivBuffer = iv.buffer.slice(0, iv.byteLength) as ArrayBuffer;
   const enc = new TextEncoder();
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
+    { name: 'AES-GCM', iv: ivBuffer },
     key,
     enc.encode(privateKey)
   );
-  const ivHex = bufToHex(iv.buffer as ArrayBuffer);
+  const ivHex = bufToHex(ivBuffer);
   const ctHex = bufToHex(ciphertext);
-  return { encrypted: ivHex + ctHex, salt };
+  return { encrypted: ivHex + ctHex, salt: saltHex };
 }
 
-async function decryptPrivateKey(encryptedHex: string, salt: string, password: string): Promise<string> {
-  const ivHex = encryptedHex.slice(0, 24);
-  const ctHex = encryptedHex.slice(24);
-  const key = await deriveKey(password, salt);
+async function decryptPrivateKey(encryptedHex: string, saltHex: string, password: string): Promise<string> {
+  if (encryptedHex.length < (IV_LENGTH * 2) + 2) {
+    throw new Error('Invalid encrypted data format');
+  }
+  const ivHex = encryptedHex.slice(0, IV_LENGTH * 2);
+  const ctHex = encryptedHex.slice(IV_LENGTH * 2);
+  const key = await deriveKey(password, saltHex);
   const iv = hexToBuf(ivHex);
+  const ivBuffer = iv.buffer.slice(0, iv.byteLength) as ArrayBuffer;
+  const ctBytes = hexToBuf(ctHex);
+  const ctBuffer = ctBytes.buffer.slice(0, ctBytes.byteLength) as ArrayBuffer;
   const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
+    { name: 'AES-GCM', iv: ivBuffer },
     key,
-    hexToBuf(ctHex).buffer as ArrayBuffer
+    ctBuffer
   );
   return new TextDecoder().decode(decrypted);
 }
 
+function validatePassword(password: string): string | null {
+  if (!password || password.length < 8) {
+    return 'Password must be at least 8 characters';
+  }
+  if (password.length > 256) {
+    return 'Password is too long';
+  }
+  return null;
+}
+
+function sanitizePrivateKey(key: string): string {
+  const trimmed = key.trim();
+  if (!trimmed) throw new Error('Private key is empty');
+  if (!ethers.isHexString(trimmed) && !ethers.isHexString('0x' + trimmed)) {
+    throw new Error('Invalid private key format');
+  }
+  return trimmed.startsWith('0x') ? trimmed : '0x' + trimmed;
+}
+
 export async function generateWallet(password: string): Promise<WalletState> {
+  const pwdError = validatePassword(password);
+  if (pwdError) throw new Error(pwdError);
+
   const wallet = ethers.Wallet.createRandom();
   const { encrypted, salt } = await encryptPrivateKey(wallet.privateKey, password);
 
   if (supabase) {
-    await supabase.from('arb_wallet').insert({
+    const { error } = await supabase.from('arb_wallet').insert({
       address: wallet.address,
       encrypted_private_key: encrypted,
       salt,
       deployed_contracts: {},
     });
+    if (error) throw new Error(`Failed to store wallet: ${error.message}`);
   }
 
   return {
@@ -98,17 +130,22 @@ export async function generateWallet(password: string): Promise<WalletState> {
   };
 }
 
-export async function importWallet(privateKey: string, password: string): Promise<WalletState> {
+export async function importWallet(privateKeyInput: string, password: string): Promise<WalletState> {
+  const pwdError = validatePassword(password);
+  if (pwdError) throw new Error(pwdError);
+
+  const privateKey = sanitizePrivateKey(privateKeyInput);
   const wallet = new ethers.Wallet(privateKey);
   const { encrypted, salt } = await encryptPrivateKey(privateKey, password);
 
   if (supabase) {
-    await supabase.from('arb_wallet').insert({
+    const { error } = await supabase.from('arb_wallet').insert({
       address: wallet.address,
       encrypted_private_key: encrypted,
       salt,
       deployed_contracts: {},
     });
+    if (error) throw new Error(`Failed to store wallet: ${error.message}`);
   }
 
   return {
@@ -123,12 +160,13 @@ export async function importWallet(privateKey: string, password: string): Promis
 
 export async function loadWallet(): Promise<WalletState | null> {
   if (!supabase) return null;
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('arb_wallet')
     .select('*')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (error) return null;
   if (!data) return null;
   const stored = data as StoredWallet;
   return {
@@ -142,6 +180,9 @@ export async function loadWallet(): Promise<WalletState | null> {
 }
 
 export async function unlockWallet(encryptedKey: string, salt: string, password: string): Promise<WalletState> {
+  const pwdError = validatePassword(password);
+  if (pwdError) throw new Error(pwdError);
+
   const privateKey = await decryptPrivateKey(encryptedKey, salt, password);
   const wallet = new ethers.Wallet(privateKey);
   return {
@@ -155,5 +196,18 @@ export async function unlockWallet(encryptedKey: string, salt: string, password:
 
 export async function updateDeployedContracts(address: string, contracts: Record<string, string>): Promise<void> {
   if (!supabase) return;
+  if (!ethers.isAddress(address)) return;
   await supabase.from('arb_wallet').update({ deployed_contracts: contracts }).eq('address', address);
+}
+
+export async function getDeployedContracts(address: string): Promise<Record<string, string>> {
+  if (!supabase) return {};
+  if (!ethers.isAddress(address)) return {};
+  const { data } = await supabase
+    .from('arb_wallet')
+    .select('deployed_contracts')
+    .eq('address', address)
+    .maybeSingle();
+  if (!data) return {};
+  return (data as { deployed_contracts?: Record<string, string> }).deployed_contracts || {};
 }

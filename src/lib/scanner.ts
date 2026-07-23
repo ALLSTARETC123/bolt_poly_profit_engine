@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { CHAINS, CHAIN_KEYS } from './chains';
 
 export interface ArbitrageOpportunity {
+  id: string;
   chain: string;
   opportunityType: 'triangular' | 'cross-dex';
   tokenPath: string[];
@@ -58,6 +59,7 @@ function generateOpportunities(chainKey: string, blockNumber: number): Arbitrage
     const dexes = tokens.slice(0, -1).map(() => DEX_NAMES[Math.floor(rng() * DEX_NAMES.length)]);
 
     opps.push({
+      id: `${chainKey}-${blockNumber}-${i}`,
       chain: chainKey,
       opportunityType: isTriangular ? 'triangular' : 'cross-dex',
       tokenPath: tokens,

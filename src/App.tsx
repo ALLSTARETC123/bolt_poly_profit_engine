@@ -3,17 +3,23 @@ import { createClient } from '@supabase/supabase-js';
 import {
   Play, Pause, RefreshCcw, Wallet, Cpu, Activity, TrendingUp,
   Shield, CheckCircle, AlertTriangle, Clock,
-  Settings, DollarSign, Fuel, Lock, Eye, EyeOff, Rocket, Zap,
+  Settings, DollarSign, Lock, Eye, EyeOff, Rocket, Zap,
   ExternalLink, Key, Copy,
 } from 'lucide-react';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
 import { scanAllChains, type ArbitrageOpportunity, type ScanResult } from './lib/scanner';
-import { deployExecutorGasless, executeArbitrageGasless, getTaskStatus, type DeploymentResult, type ExecutionResult } from './lib/executor';
-import { generateWallet, importWallet, unlockWallet, loadWallet, updateDeployedContracts, type WalletState } from './lib/wallet';
+import {
+  deployExecutorGasless, executeArbitrageGasless, getTaskStatus, checkGelatoHealth,
+  type DeploymentResult, type ExecutionResult,
+} from './lib/executor';
+import {
+  generateWallet, importWallet, unlockWallet, loadWallet,
+  updateDeployedContracts, getDeployedContracts, type WalletState,
+} from './lib/wallet';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-const supabase = supabaseUrl ? createClient(supabaseUrl, supabaseKey) : null;
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 type Tab = 'dashboard' | 'wallet' | 'opportunities' | 'settings';
 interface AlertItem { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
@@ -55,14 +61,11 @@ export default function App() {
         const loaded = await loadWallet();
         setWalletLoaded(true);
         if (loaded) {
-          setWallet({
-            address: loaded.address,
-            encryptedKey: loaded.encryptedKey,
-            salt: loaded.salt,
-            isUnlocked: false,
-            signer: null,
-            settlementAddress: loaded.settlementAddress,
-          });
+          setWallet(loaded);
+          const contracts = await getDeployedContracts(loaded.address);
+          if (contracts && Object.keys(contracts).length > 0) {
+            setDeployedContracts(contracts);
+          }
         }
       } catch {
         setWalletLoaded(true);
@@ -77,28 +80,15 @@ export default function App() {
             .limit(50);
           if (td) {
             const profit = (td as { type: string; amount_usd: string }[])
-              .filter(t => t.type === 'profit' || t.type === 'syncfee_executed')
+              .filter(t => t.type === 'profit')
               .reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
             setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
       }
 
-      try {
-        const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
-          body: JSON.stringify({ action: 'health' }),
-        });
-        if (resp.ok) {
-          const health = await resp.json();
-          setGelatoStatus({ configured: health.gelatoConfigured, mode: health.mode });
-        } else {
-          setGelatoStatus({ configured: false, mode: 'not_configured' });
-        }
-      } catch {
-        setGelatoStatus({ configured: false, mode: 'not_configured' });
-      }
+      const health = await checkGelatoHealth();
+      setGelatoStatus(health);
     })();
   }, []);
 
@@ -110,6 +100,7 @@ export default function App() {
     try {
       const ws = await generateWallet(password);
       setWallet(ws);
+      setPassword('');
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
       setActiveTab('dashboard');
     } catch (err: unknown) {
@@ -125,9 +116,10 @@ export default function App() {
     try {
       const ws = await importWallet(importKeyInput, password);
       setWallet(ws);
-      pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setShowImport(false);
+      setPassword('');
       setImportKeyInput('');
+      setShowImport(false);
+      pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
       setActiveTab('dashboard');
     } catch (err: unknown) {
       pushAlert('error', String(err));
@@ -139,6 +131,7 @@ export default function App() {
     try {
       const ws = await unlockWallet(wallet.encryptedKey, wallet.salt, password);
       setWallet(ws);
+      setPassword('');
       pushAlert('success', 'Wallet unlocked');
     } catch {
       pushAlert('error', 'Invalid password');
@@ -221,10 +214,7 @@ export default function App() {
     pushAlert('info', `Executing arb on ${opp.chain} (${opp.opportunityType})...`);
 
     const result: ExecutionResult = await executeArbitrageGasless(
-      wallet.signer!,
-      opp.chain,
-      opp,
-      executorAddress
+      wallet.signer!, opp.chain, opp, executorAddress
     );
 
     if (result.success) {
@@ -240,8 +230,6 @@ export default function App() {
           const status = await getTaskStatus(result.taskId!);
           if (status.success && status.transactionHash) {
             pushAlert('success', `Confirmed on ${opp.chain}: tx ${status.transactionHash.slice(0, 20)}...`);
-          } else if (status.success && status.taskState) {
-            pushAlert('info', `Task ${result.taskId?.slice(0, 12)}... state: ${status.taskState}`);
           }
         }, 15000);
       }
@@ -435,8 +423,8 @@ export default function App() {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {allOpportunities.slice(0, 10).map((opp, i) => (
-                    <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                  {allOpportunities.slice(0, 10).map((opp) => (
+                    <div key={opp.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
                       <span
                         className={`text-xs px-2 py-0.5 rounded ${
                           opp.opportunityType === 'triangular'
@@ -598,8 +586,8 @@ export default function App() {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {allOpportunities.map((opp, i) => (
-                    <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                  {allOpportunities.map((opp) => (
+                    <div key={opp.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
                       <span
                         className={`text-xs px-2 py-0.5 rounded ${
                           opp.opportunityType === 'triangular'
@@ -729,7 +717,7 @@ export default function App() {
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="font-semibold text-slate-300 mb-2">Step 3: Add the Key to This Project</p>
                   <p className="text-xs mb-2">
-                    The key is already set as the{' '}
+                    The key is stored as the{' '}
                     <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">GELATO_API_KEY</code> edge function
                     secret. If you need to update it, run this in your terminal:
                   </p>
@@ -744,20 +732,6 @@ export default function App() {
                       <Copy className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                  <p className="text-xs mt-2 text-slate-500">
-                    Or in the Supabase Dashboard: Project Settings &gt; Edge Functions &gt; Secrets &gt; Add secret with
-                    name <code className="text-emerald-300">GELATO_API_KEY</code>
-                  </p>
-                </div>
-
-                <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="font-semibold text-slate-300 mb-2">Step 4: Start the Engine</p>
-                  <p className="text-xs">
-                    Once the key is set, click "Start Engine" on the dashboard. The scanner finds arbitrage opportunities,
-                    Gelato relays them via{' '}
-                    <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">callWithSyncFee</code>, and the
-                    fee is deducted from the profit itself — zero upfront capital required.
-                  </p>
                 </div>
 
                 <div className="bg-slate-800/50 rounded-lg p-4">
@@ -841,15 +815,9 @@ export default function App() {
 }
 
 function StatCard({
-  icon,
-  label,
-  value,
-  color,
+  icon, label, value, color,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  color: string;
+  icon: React.ReactNode; label: string; value: string; color: string;
 }) {
   const cm: Record<string, string> = {
     emerald: 'text-emerald-400 bg-emerald-950/30',

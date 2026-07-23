@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { CHAINS } from './chains';
+import { CHAINS, CHAIN_KEYS } from './chains';
 import type { ArbitrageOpportunity } from './scanner';
 
 export interface DeploymentResult {
@@ -17,6 +17,18 @@ export interface ExecutionResult {
   error?: string;
 }
 
+function getSupabaseUrl(): string {
+  const url = import.meta.env.VITE_SUPABASE_URL;
+  if (!url) throw new Error('VITE_SUPABASE_URL is not configured');
+  return url;
+}
+
+function getSupabaseAnonKey(): string {
+  const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  if (!key) throw new Error('VITE_SUPABASE_ANON_KEY is not configured');
+  return key;
+}
+
 export async function deployExecutorGasless(
   signer: ethers.AbstractSigner,
   chainKey: string
@@ -26,6 +38,10 @@ export async function deployExecutorGasless(
     if (!chain) return { success: false, error: `Unknown chain: ${chainKey}` };
 
     const deployerAddress = await signer.getAddress();
+    if (!ethers.isAddress(deployerAddress)) {
+      return { success: false, error: 'Invalid deployer address' };
+    }
+
     const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
     const nonce = await provider.getTransactionCount(deployerAddress);
     const contractAddress = ethers.getCreateAddress({
@@ -49,8 +65,12 @@ export async function executeArbitrageGasless(
     const chain = CHAINS[chainKey];
     if (!chain) return { success: false, error: `Unknown chain: ${chainKey}` };
 
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+    if (!ethers.isAddress(executorAddress)) {
+      return { success: false, error: 'Invalid executor address' };
+    }
+
+    const supabaseUrl = getSupabaseUrl();
+    const supabaseKey = getSupabaseAnonKey();
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
       method: 'POST',
@@ -95,8 +115,12 @@ export async function executeArbitrageGasless(
 
 export async function getTaskStatus(taskId: string): Promise<{ success: boolean; taskState?: string; transactionHash?: string; error?: string }> {
   try {
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+    if (!taskId || typeof taskId !== 'string') {
+      return { success: false, error: 'Invalid task ID' };
+    }
+
+    const supabaseUrl = getSupabaseUrl();
+    const supabaseKey = getSupabaseAnonKey();
 
     const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
       method: 'POST',
@@ -117,5 +141,27 @@ export async function getTaskStatus(taskId: string): Promise<{ success: boolean;
     };
   } catch (err: unknown) {
     return { success: false, error: String(err) };
+  }
+}
+
+export async function checkGelatoHealth(): Promise<{ configured: boolean; mode: string }> {
+  try {
+    const supabaseUrl = getSupabaseUrl();
+    const supabaseKey = getSupabaseAnonKey();
+
+    const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${supabaseKey}`,
+      },
+      body: JSON.stringify({ action: 'health' }),
+    });
+
+    if (!resp.ok) return { configured: false, mode: 'not_configured' };
+    const health = await resp.json();
+    return { configured: health.gelatoConfigured, mode: health.mode };
+  } catch {
+    return { configured: false, mode: 'not_configured' };
   }
 }
