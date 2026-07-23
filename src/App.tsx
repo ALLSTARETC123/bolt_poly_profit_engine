@@ -23,7 +23,7 @@ export default function App() {
   const [wallet, setWallet] = useState<WalletState | null>(null);
   const [walletLoaded, setWalletLoaded] = useState(false);
   const [password, setPassword] = useState('');
-  const [importKey, setImportKey] = useState('');
+  const [importKeyInput, setImportKeyInput] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -54,17 +54,31 @@ export default function App() {
       try {
         const loaded = await loadWallet();
         setWalletLoaded(true);
-        if (loaded) setWallet({
-          address: loaded.address, encryptedKey: loaded.encryptedKey, salt: loaded.salt,
-          isUnlocked: false, signer: null, settlementAddress: loaded.settlementAddress,
-        });
-      } catch { setWalletLoaded(true); }
+        if (loaded) {
+          setWallet({
+            address: loaded.address,
+            encryptedKey: loaded.encryptedKey,
+            salt: loaded.salt,
+            isUnlocked: false,
+            signer: null,
+            settlementAddress: loaded.settlementAddress,
+          });
+        }
+      } catch {
+        setWalletLoaded(true);
+      }
 
       if (supabase) {
         try {
-          const { data: td } = await supabase.from('arb_treasury').select('*').order('created_at', { ascending: false }).limit(50);
+          const { data: td } = await supabase
+            .from('arb_treasury')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50);
           if (td) {
-            const profit = (td as { type: string; amount_usd: string }[]).filter(t => t.type === 'profit' || t.type === 'syncfee_executed').reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
+            const profit = (td as { type: string; amount_usd: string }[])
+              .filter(t => t.type === 'profit' || t.type === 'syncfee_executed')
+              .reduce((s, t) => s + parseFloat(t.amount_usd || '0'), 0);
             setTotalProfit(profit);
           }
         } catch { /* non-fatal */ }
@@ -73,7 +87,7 @@ export default function App() {
       try {
         const resp = await fetch(`${supabaseUrl}/functions/v1/gelato-gas-manager`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseKey}` },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${supabaseKey}` },
           body: JSON.stringify({ action: 'health' }),
         });
         if (resp.ok) {
@@ -89,24 +103,35 @@ export default function App() {
   }, []);
 
   const handleGenerateWallet = async () => {
-    if (!password || password.length < 8) { pushAlert('error', 'Password must be at least 8 characters'); return; }
+    if (!password || password.length < 8) {
+      pushAlert('error', 'Password must be at least 8 characters');
+      return;
+    }
     try {
       const ws = await generateWallet(password);
       setWallet(ws);
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
       setActiveTab('dashboard');
-    } catch (err: unknown) { pushAlert('error', String(err)); }
+    } catch (err: unknown) {
+      pushAlert('error', String(err));
+    }
   };
 
   const handleImportWallet = async () => {
-    if (!importKey || !password || password.length < 8) { pushAlert('error', 'Enter private key and password (min 8 chars)'); return; }
+    if (!importKeyInput || !password || password.length < 8) {
+      pushAlert('error', 'Enter private key and password (min 8 chars)');
+      return;
+    }
     try {
-      const ws = await importWallet(importKey, password);
+      const ws = await importWallet(importKeyInput, password);
       setWallet(ws);
       pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setShowImport(false); setImportKey('');
+      setShowImport(false);
+      setImportKeyInput('');
       setActiveTab('dashboard');
-    } catch (err: unknown) { pushAlert('error', String(err)); }
+    } catch (err: unknown) {
+      pushAlert('error', String(err));
+    }
   };
 
   const handleUnlock = async () => {
@@ -115,11 +140,17 @@ export default function App() {
       const ws = await unlockWallet(wallet.encryptedKey, wallet.salt, password);
       setWallet(ws);
       pushAlert('success', 'Wallet unlocked');
-    } catch { pushAlert('error', 'Invalid password'); }
+    } catch {
+      pushAlert('error', 'Invalid password');
+    }
   };
 
   const handleOneClickStart = async () => {
-    if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); setActiveTab('wallet'); return; }
+    if (!wallet?.signer) {
+      pushAlert('error', 'Unlock your wallet first');
+      setActiveTab('wallet');
+      return;
+    }
 
     setDeploying(true);
     pushAlert('info', 'Computing executor contract addresses...');
@@ -131,7 +162,7 @@ export default function App() {
           const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}: ${result.contractAddress.slice(0, 10)}...`);
+          pushAlert('success', `Executor ready on ${CHAINS[chainKey].name}`);
         } else {
           pushAlert('warning', `Deploy on ${CHAINS[chainKey].name} failed: ${result.error?.slice(0, 80)}`);
         }
@@ -147,7 +178,10 @@ export default function App() {
 
   const stopEngine = () => {
     setEngineRunning(false);
-    if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
     pushAlert('info', 'Engine stopped');
   };
 
@@ -156,7 +190,9 @@ export default function App() {
     try {
       const results = await scanAllChains();
       setScanResults(results);
-      const opps = results.flatMap(r => r.opportunities).sort((a, b) => b.netProfit - a.netProfit);
+      const opps = results
+        .flatMap(r => r.opportunities)
+        .sort((a, b) => b.netProfit - a.netProfit);
       setAllOpportunities(opps);
 
       if (autoExecute && wallet?.signer) {
@@ -165,23 +201,39 @@ export default function App() {
           await executeOpportunity(opp);
         }
       }
-    } catch (err: unknown) { pushAlert('error', `Scan failed: ${String(err).slice(0, 100)}`); }
+    } catch (err: unknown) {
+      pushAlert('error', `Scan failed: ${String(err).slice(0, 100)}`);
+    }
   };
 
   const executeOpportunity = async (opp: ArbitrageOpportunity) => {
-    if (!wallet?.signer) { pushAlert('error', 'Unlock wallet to execute'); return; }
+    if (!wallet?.signer) {
+      pushAlert('error', 'Unlock wallet to execute');
+      return;
+    }
     const executorAddress = deployedContracts[opp.chain];
-    if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
+    if (!executorAddress) {
+      pushAlert('error', `No executor contract on ${opp.chain}`);
+      return;
+    }
 
     setExecuting(true);
     pushAlert('info', `Executing arb on ${opp.chain} (${opp.opportunityType})...`);
 
-    const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress);
+    const result: ExecutionResult = await executeArbitrageGasless(
+      wallet.signer!,
+      opp.chain,
+      opp,
+      executorAddress
+    );
 
     if (result.success) {
       setExecutedCount(prev => prev + 1);
       setTotalProfit(prev => prev + (result.profitUsd || 0));
-      pushAlert('success', `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (task: ${result.taskId?.slice(0, 12) || 'pending'}...)`);
+      pushAlert(
+        'success',
+        `Arb executed on ${opp.chain}: +$${result.profitUsd?.toFixed(2)} (task: ${result.taskId?.slice(0, 12) || 'pending'}...)`
+      );
 
       if (result.taskId) {
         setTimeout(async () => {
@@ -200,7 +252,10 @@ export default function App() {
   };
 
   const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
-  const copyToClipboard = (text: string) => { navigator.clipboard.writeText(text); pushAlert('info', 'Copied to clipboard'); };
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    pushAlert('info', 'Copied to clipboard');
+  };
 
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-200">
@@ -219,7 +274,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             {gelatoStatus && (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${gelatoStatus.configured ? 'bg-emerald-950/50 border-emerald-800/50' : 'bg-amber-950/50 border-amber-800/50'}">
+              <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${gelatoStatus.configured ? 'bg-emerald-950/50 border-emerald-800/50' : 'bg-amber-950/50 border-amber-800/50'}`}>
                 <div className={`w-1.5 h-1.5 rounded-full ${gelatoStatus.configured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
                 <span className={`text-xs ${gelatoStatus.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
                   {gelatoStatus.configured ? 'SyncFee Live' : 'Gelato Key Needed'}
@@ -229,17 +284,29 @@ export default function App() {
             {wallet && (
               <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/50">
                 <Wallet className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-xs font-mono text-slate-300">{wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}</span>
-                {wallet.isUnlocked ? <CheckCircle className="w-3 h-3 text-emerald-400" /> : <Lock className="w-3 h-3 text-amber-400" />}
+                <span className="text-xs font-mono text-slate-300">
+                  {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)}
+                </span>
+                {wallet.isUnlocked ? (
+                  <CheckCircle className="w-3 h-3 text-emerald-400" />
+                ) : (
+                  <Lock className="w-3 h-3 text-amber-400" />
+                )}
               </div>
             )}
             {engineRunning ? (
-              <button onClick={stopEngine} className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
+              <button
+                onClick={stopEngine}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors"
+              >
                 <Pause className="w-4 h-4" /> Stop
               </button>
             ) : (
-              <button onClick={handleOneClickStart} disabled={deploying}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
+              <button
+                onClick={handleOneClickStart}
+                disabled={deploying}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors"
+              >
                 {deploying ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                 {deploying ? 'Deploying...' : 'Start Engine'}
               </button>
@@ -248,8 +315,17 @@ export default function App() {
         </div>
         <div className="max-w-7xl mx-auto px-4 flex gap-1">
           {(['dashboard', 'wallet', 'opportunities', 'settings'] as Tab[]).map(tab => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors ${activeTab === tab ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{tab}</button>
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors ${
+                activeTab === tab
+                  ? 'border-emerald-500 text-emerald-400'
+                  : 'border-transparent text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {tab}
+            </button>
           ))}
         </div>
       </header>
@@ -258,7 +334,18 @@ export default function App() {
         {alerts.length > 0 && (
           <div className="mb-4 space-y-1.5 max-h-32 overflow-y-auto">
             {alerts.slice(0, 5).map(a => (
-              <div key={a.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${a.type === 'success' ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300' : a.type === 'error' ? 'bg-red-950/50 border border-red-800/50 text-red-300' : a.type === 'warning' ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300' : 'bg-blue-950/50 border border-blue-800/50 text-blue-300'}`}>
+              <div
+                key={a.id}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${
+                  a.type === 'success'
+                    ? 'bg-emerald-950/50 border border-emerald-800/50 text-emerald-300'
+                    : a.type === 'error'
+                    ? 'bg-red-950/50 border border-red-800/50 text-red-300'
+                    : a.type === 'warning'
+                    ? 'bg-amber-950/50 border border-amber-800/50 text-amber-300'
+                    : 'bg-blue-950/50 border border-blue-800/50 text-blue-300'
+                }`}
+              >
                 {a.type === 'success' && <CheckCircle className="w-4 h-4 flex-shrink-0" />}
                 {a.type === 'error' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
                 {a.type === 'warning' && <AlertTriangle className="w-4 h-4 flex-shrink-0" />}
@@ -284,13 +371,17 @@ export default function App() {
                 <Zap className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <div>
                   <p className="text-sm font-semibold text-emerald-300">100% Zero-Capital Architecture · SyncFee Mode</p>
-                  <p className="text-xs text-slate-400">Balancer 0% flash loans + Gelato callWithSyncFee (fee paid from profit, no deposit). Scans every {SCAN_INTERVAL_MS}ms. Zero upfront gas, zero seed capital.</p>
+                  <p className="text-xs text-slate-400">
+                    Balancer 0% flash loans + Gelato callWithSyncFee (fee paid from profit, no deposit). Scans every {SCAN_INTERVAL_MS}ms. Zero upfront gas, zero seed capital.
+                  </p>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Cpu className="w-4 h-4 text-cyan-400" /> Engine Status</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-cyan-400" /> Engine Status
+              </h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatusItem label="Engine" value={engineRunning ? 'RUNNING' : 'STOPPED'} color={engineRunning ? 'emerald' : 'slate'} />
                 <StatusItem label="Auto-Execute" value={autoExecute ? 'ON' : 'OFF'} color={autoExecute ? 'emerald' : 'slate'} />
@@ -300,7 +391,9 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-cyan-400" /> Chain Scanner Status
+              </h3>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
                   const chain = CHAINS[chainKey];
@@ -313,9 +406,19 @@ export default function App() {
                       <span className="text-sm font-medium w-28">{chain.name}</span>
                       <span className="text-xs text-slate-500">~{chain.blockTimeMs / 1000}s/block</span>
                       <span className="text-xs text-slate-400">{oppCount} opps</span>
-                      {result?.scanTimeMs !== undefined && <span className="text-xs text-slate-500">{result.scanTimeMs}ms</span>}
+                      {result?.scanTimeMs !== undefined && (
+                        <span className="text-xs text-slate-500">{result.scanTimeMs}ms</span>
+                      )}
                       <div className="flex-1" />
-                      {hasContract ? <span className="text-xs text-emerald-400 flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Ready</span> : <span className="text-xs text-slate-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Auto-deploys</span>}
+                      {hasContract ? (
+                        <span className="text-xs text-emerald-400 flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3" /> Ready
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-500 flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> Auto-deploys
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -323,21 +426,41 @@ export default function App() {
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-emerald-400" /> Live Opportunities
+              </h3>
               {allOpportunities.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-8">{engineRunning ? 'Scanning every 3s...' : 'Start the engine to scan for arbitrage opportunities'}</p>
+                <p className="text-sm text-slate-500 text-center py-8">
+                  {engineRunning ? 'Scanning every 3s...' : 'Start the engine to scan for arbitrage opportunities'}
+                </p>
               ) : (
                 <div className="space-y-2">
                   {allOpportunities.slice(0, 10).map((opp, i) => (
                     <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded ${opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' : 'bg-blue-950/50 text-blue-300'}`}>{opp.opportunityType}</span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded ${
+                          opp.opportunityType === 'triangular'
+                            ? 'bg-purple-950/50 text-purple-300'
+                            : 'bg-blue-950/50 text-blue-300'
+                        }`}
+                      >
+                        {opp.opportunityType}
+                      </span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">
+                        {opp.tokenPath.join(' -> ')}
+                      </span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
                       <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(2)}</span>
                       <span className="text-xs text-slate-500">{opp.profitMarginPct.toFixed(2)}%</span>
                       {wallet?.isUnlocked && deployedContracts[opp.chain] && (
-                        <button onClick={() => executeOpportunity(opp)} disabled={executing} className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded text-xs font-medium">Execute</button>
+                        <button
+                          onClick={() => executeOpportunity(opp)}
+                          disabled={executing}
+                          className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded text-xs font-medium"
+                        >
+                          Execute
+                        </button>
                       )}
                     </div>
                   ))}
@@ -350,33 +473,92 @@ export default function App() {
         {activeTab === 'wallet' && (
           <div className="max-w-lg space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management</h3>
-              {!walletLoaded ? <p className="text-sm text-slate-500">Loading...</p> : !wallet ? (
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-cyan-400" /> Wallet Management
+              </h3>
+              {!walletLoaded ? (
+                <p className="text-sm text-slate-500">Loading...</p>
+              ) : !wallet ? (
                 <div className="space-y-4">
-                  <p className="text-sm text-slate-400">Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM and stored in Supabase. A settlement wallet is created automatically — profits flow there, transferable later.</p>
+                  <p className="text-sm text-slate-400">
+                    Create a new wallet or import an existing one. Your private key is encrypted with AES-256-GCM and stored in Supabase.
+                  </p>
                   <div className="space-y-3">
                     <div className="relative">
-                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password (min 8 chars)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
-                      <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">{showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        placeholder="Password (min 8 chars)"
+                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10"
+                      />
+                      <button
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
                     </div>
-                    <button onClick={handleGenerateWallet} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium">Generate New Wallet</button>
+                    <button
+                      onClick={handleGenerateWallet}
+                      className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+                    >
+                      Generate New Wallet
+                    </button>
                     {showImport && (
                       <div className="space-y-2 pt-2 border-t border-slate-800">
-                        <input type="text" value={importKey} onChange={e => setImportKey(e.target.value)} placeholder="Private key (0x...)" className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono" />
-                        <button onClick={handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium">Import Wallet</button>
+                        <input
+                          type="text"
+                          value={importKeyInput}
+                          onChange={e => setImportKeyInput(e.target.value)}
+                          placeholder="Private key (0x...)"
+                          className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono"
+                        />
+                        <button
+                          onClick={handleImportWallet}
+                          className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium"
+                        >
+                          Import Wallet
+                        </button>
                       </div>
                     )}
-                    {!showImport && <button onClick={() => setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">Import existing wallet &gt;</button>}
+                    {!showImport && (
+                      <button
+                        onClick={() => setShowImport(true)}
+                        className="w-full text-sm text-slate-400 hover:text-slate-300"
+                      >
+                        Import existing wallet &gt;
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : !wallet.isUnlocked ? (
                 <div className="space-y-4">
-                  <p className="text-sm text-slate-400">Wallet found: <span className="font-mono text-slate-300">{wallet.address}</span></p>
+                  <p className="text-sm text-slate-400">
+                    Wallet found: <span className="font-mono text-slate-300">{wallet.address}</span>
+                  </p>
                   <div className="relative">
-                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && handleUnlock()} className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10" />
-                    <button onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">{showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={e => setPassword(e.target.value)}
+                      placeholder="Enter password to unlock"
+                      onKeyDown={e => e.key === 'Enter' && handleUnlock()}
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10"
+                    />
+                    <button
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500"
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                   </div>
-                  <button onClick={handleUnlock} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium">Unlock Wallet</button>
+                  <button
+                    onClick={handleUnlock}
+                    className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium"
+                  >
+                    Unlock Wallet
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -388,11 +570,15 @@ export default function App() {
                     <div className="bg-slate-800/50 rounded-lg p-4">
                       <p className="text-xs text-slate-500 mb-1">Settlement Address (auto-generated)</p>
                       <p className="text-sm font-mono text-cyan-300">{wallet.settlementAddress}</p>
-                      <p className="text-xs text-slate-500 mt-2">Profits accumulate here. Transfer to your MetaMask or any wallet at your convenience.</p>
+                      <p className="text-xs text-slate-500 mt-2">
+                        Profits accumulate here. Transfer to your MetaMask or any wallet at your convenience.
+                      </p>
                     </div>
                   )}
                   <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
-                    <p className="text-xs text-emerald-300 flex items-center gap-1.5"><Zap className="w-3 h-3" /> Zero-capital mode active. No gas tokens needed — SyncFee pays from profit.</p>
+                    <p className="text-xs text-emerald-300 flex items-center gap-1.5">
+                      <Zap className="w-3 h-3" /> Zero-capital mode active. No gas tokens needed — SyncFee pays from profit.
+                    </p>
                   </div>
                 </div>
               )}
@@ -403,14 +589,30 @@ export default function App() {
         {activeTab === 'opportunities' && (
           <div className="space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4">All Opportunities ({allOpportunities.length})</h3>
-              {allOpportunities.length === 0 ? <p className="text-sm text-slate-500 text-center py-8">No opportunities found. Start the engine to scan.</p> : (
+              <h3 className="text-sm font-semibold text-slate-300 mb-4">
+                All Opportunities ({allOpportunities.length})
+              </h3>
+              {allOpportunities.length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-8">
+                  No opportunities found. Start the engine to scan.
+                </p>
+              ) : (
                 <div className="space-y-2">
                   {allOpportunities.map((opp, i) => (
                     <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                      <span className={`text-xs px-2 py-0.5 rounded ${opp.opportunityType === 'triangular' ? 'bg-purple-950/50 text-purple-300' : 'bg-blue-950/50 text-blue-300'}`}>{opp.opportunityType}</span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded ${
+                          opp.opportunityType === 'triangular'
+                            ? 'bg-purple-950/50 text-purple-300'
+                            : 'bg-blue-950/50 text-blue-300'
+                        }`}
+                      >
+                        {opp.opportunityType}
+                      </span>
                       <span className="text-xs text-slate-400">{opp.chain}</span>
-                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
+                      <span className="text-xs font-mono text-slate-300 flex-1 truncate">
+                        {opp.tokenPath.join(' -> ')}
+                      </span>
                       <span className="text-xs text-slate-500">{opp.dexPath.join(' / ')}</span>
                       <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(2)}</span>
                       <span className="text-xs text-slate-500">{opp.profitMarginPct.toFixed(2)}%</span>
@@ -426,34 +628,66 @@ export default function App() {
         {activeTab === 'settings' && (
           <div className="max-w-2xl space-y-4">
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Settings className="w-4 h-4 text-cyan-400" /> Engine Settings</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Settings className="w-4 h-4 text-cyan-400" /> Engine Settings
+              </h3>
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <div><p className="text-sm font-medium text-slate-300">Auto-Execute</p><p className="text-xs text-slate-500">Automatically execute profitable opportunities via Gelato</p></div>
-                  <button onClick={() => setAutoExecute(!autoExecute)} className={`w-12 h-6 rounded-full transition-colors ${autoExecute ? 'bg-emerald-600' : 'bg-slate-700'}`}>
-                    <div className={`w-5 h-5 rounded-full bg-white transition-transform ${autoExecute ? 'translate-x-6' : 'translate-x-0.5'}`} />
+                  <div>
+                    <p className="text-sm font-medium text-slate-300">Auto-Execute</p>
+                    <p className="text-xs text-slate-500">Automatically execute profitable opportunities via Gelato</p>
+                  </div>
+                  <button
+                    onClick={() => setAutoExecute(!autoExecute)}
+                    className={`w-12 h-6 rounded-full transition-colors ${autoExecute ? 'bg-emerald-600' : 'bg-slate-700'}`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                        autoExecute ? 'translate-x-6' : 'translate-x-0.5'
+                      }`}
+                    />
                   </button>
                 </div>
                 <div>
                   <label className="text-sm font-medium text-slate-300">Min Profit (USD)</label>
-                  <input type="text" value={minProfit} onChange={e => setMinProfit(e.target.value)} className="w-full px-3 py-2 mt-1 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white" />
+                  <input
+                    type="text"
+                    value={minProfit}
+                    onChange={e => setMinProfit(e.target.value)}
+                    className="w-full px-3 py-2 mt-1 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white"
+                  />
                 </div>
                 <div>
                   <label className="text-sm font-medium text-slate-300">Scan Interval</label>
-                  <p className="text-xs text-slate-500 mt-1">{SCAN_INTERVAL_MS / 1000} seconds — matches Polygon/Optimism block times (~2s), captures Arbitrum sub-second blocks</p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {SCAN_INTERVAL_MS / 1000} seconds — matches Polygon/Optimism block times (~2s), captures Arbitrum sub-second blocks
+                  </p>
                 </div>
               </div>
             </div>
 
-            {/* GELATO API KEY INSTRUCTIONS */}
             <div className="bg-slate-900/50 rounded-xl border border-amber-800/40 p-6">
               <h3 className="text-sm font-semibold text-amber-300 mb-4 flex items-center gap-2">
                 <Key className="w-4 h-4 text-amber-400" /> Gelato API Key — Required for Live Execution
               </h3>
 
-              <div className={`mb-4 p-3 rounded-lg border ${gelatoStatus?.configured ? 'bg-emerald-950/30 border-emerald-800/40' : 'bg-amber-950/30 border-amber-800/40'}`}>
-                <p className={`text-sm flex items-center gap-2 ${gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
-                  {gelatoStatus?.configured ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+              <div
+                className={`mb-4 p-3 rounded-lg border ${
+                  gelatoStatus?.configured
+                    ? 'bg-emerald-950/30 border-emerald-800/40'
+                    : 'bg-amber-950/30 border-amber-800/40'
+                }`}
+              >
+                <p
+                  className={`text-sm flex items-center gap-2 ${
+                    gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'
+                  }`}
+                >
+                  {gelatoStatus?.configured ? (
+                    <CheckCircle className="w-4 h-4" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4" />
+                  )}
                   {gelatoStatus?.configured
                     ? 'Gelato API key is configured. Live SyncFee execution is active.'
                     : 'Gelato API key is NOT configured. You must add one before the engine can execute real transactions.'}
@@ -464,8 +698,12 @@ export default function App() {
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="font-semibold text-slate-300 mb-2">Step 1: Create a Gelato Account (Free, no credit card)</p>
                   <p className="text-xs mb-2">Go to the Gelato app and sign up with your wallet or email:</p>
-                  <a href="https://app.gelato.network" target="_blank" rel="noopener noreferrer"
-                     className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-xs">
+                  <a
+                    href="https://app.gelato.network"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-xs"
+                  >
                     <ExternalLink className="w-3 h-3" /> https://app.gelato.network
                   </a>
                 </div>
@@ -473,28 +711,53 @@ export default function App() {
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="font-semibold text-slate-300 mb-2">Step 2: Get Your API Key</p>
                   <p className="text-xs space-y-1">
-                    <span className="block">1. After signing in, click on <strong className="text-slate-200">"Relay"</strong> in the left sidebar</span>
-                    <span className="block">2. Click <strong className="text-slate-200">"Create App"</strong> and give it a name (e.g. "FlashArb")</span>
-                    <span className="block">3. Select the chains you want: Polygon, Arbitrum, Optimism, Base</span>
-                    <span className="block">4. Copy the <strong className="text-slate-200">Sponsor API Key</strong> — this is the key you need</span>
+                    <span className="block">
+                      1. After signing in, click on <strong className="text-slate-200">"Relay"</strong> in the left sidebar
+                    </span>
+                    <span className="block">
+                      2. Click <strong className="text-slate-200">"Create App"</strong> and give it a name (e.g. "FlashArb")
+                    </span>
+                    <span className="block">
+                      3. Select the chains you want: Polygon, Arbitrum, Optimism, Base
+                    </span>
+                    <span className="block">
+                      4. Copy the <strong className="text-slate-200">Sponsor API Key</strong> — this is the key you need
+                    </span>
                   </p>
                 </div>
 
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="font-semibold text-slate-300 mb-2">Step 3: Add the Key to This Project</p>
-                  <p className="text-xs mb-2">The key is already set as the <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">GELATO_API_KEY</code> edge function secret. If you need to update it, run this in your terminal:</p>
+                  <p className="text-xs mb-2">
+                    The key is already set as the{' '}
+                    <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">GELATO_API_KEY</code> edge function
+                    secret. If you need to update it, run this in your terminal:
+                  </p>
                   <div className="relative">
-                    <code className="block bg-slate-900 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">npx supabase secrets set GELATO_API_KEY=your_key_here</code>
-                    <button onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')} className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
+                    <code className="block bg-slate-900 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">
+                      npx supabase secrets set GELATO_API_KEY=your_key_here
+                    </code>
+                    <button
+                      onClick={() => copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')}
+                      className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300"
+                    >
                       <Copy className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                  <p className="text-xs mt-2 text-slate-500">Or in the Supabase Dashboard: Project Settings &gt; Edge Functions &gt; Secrets &gt; Add secret with name <code className="text-emerald-300">GELATO_API_KEY</code></p>
+                  <p className="text-xs mt-2 text-slate-500">
+                    Or in the Supabase Dashboard: Project Settings &gt; Edge Functions &gt; Secrets &gt; Add secret with
+                    name <code className="text-emerald-300">GELATO_API_KEY</code>
+                  </p>
                 </div>
 
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="font-semibold text-slate-300 mb-2">Step 4: Start the Engine</p>
-                  <p className="text-xs">Once the key is set, click "Start Engine" on the dashboard. The scanner finds arbitrage opportunities, Gelato relays them via <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">callWithSyncFee</code>, and the fee is deducted from the profit itself — zero upfront capital required.</p>
+                  <p className="text-xs">
+                    Once the key is set, click "Start Engine" on the dashboard. The scanner finds arbitrage opportunities,
+                    Gelato relays them via{' '}
+                    <code className="text-emerald-300 bg-slate-900 px-1.5 py-0.5 rounded">callWithSyncFee</code>, and the
+                    fee is deducted from the profit itself — zero upfront capital required.
+                  </p>
                 </div>
 
                 <div className="bg-slate-800/50 rounded-lg p-4">
@@ -503,34 +766,50 @@ export default function App() {
                     {[
                       'Scanner finds a profitable arbitrage opportunity',
                       'Gelato relays the transaction to your executor contract',
-                      'Contract takes a Balancer 0% flash loan (no collateral)',
+                      "Contract takes a Balancer 0% flash loan (no collateral)",
                       'Arbitrage executes, profit is generated in USDC',
-                      'Contract pays Gelato\'s relay fee from the profit itself',
+                      "Contract pays Gelato's relay fee from the profit itself",
                       'Remaining profit goes to your settlement wallet',
                     ].map((step, i) => (
                       <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white flex-shrink-0">{i+1}</span>
+                        <span className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-white flex-shrink-0">
+                          {i + 1}
+                        </span>
                         <span>{step}</span>
                       </div>
                     ))}
                   </div>
-                  <p className="text-xs text-emerald-300 mt-2 pl-7">No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.</p>
+                  <p className="text-xs text-emerald-300 mt-2 pl-7">
+                    No 1Balance deposit. No upfront gas. Fee comes from the arb profit itself.
+                  </p>
                 </div>
 
                 <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="font-semibold text-slate-300 mb-2 flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> MEV Protection</p>
-                  <p className="text-xs mb-2">Transactions routed through Gelato's private mempool to protect against:</p>
+                  <p className="font-semibold text-slate-300 mb-2 flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-cyan-400" /> MEV Protection
+                  </p>
+                  <p className="text-xs mb-2">
+                    Transactions routed through Gelato's private mempool to protect against:
+                  </p>
                   <ul className="space-y-1 ml-4 text-xs">
-                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks</li>
-                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks</li>
-                    <li className="flex items-center gap-2"><CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots</li>
+                    <li className="flex items-center gap-2">
+                      <CheckCircle className="w-3 h-3 text-emerald-400" /> Front-running attacks
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <CheckCircle className="w-3 h-3 text-emerald-400" /> Sandwich attacks
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <CheckCircle className="w-3 h-3 text-emerald-400" /> MEV extraction bots
+                    </li>
                   </ul>
                 </div>
               </div>
             </div>
 
             <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2"><Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts</h3>
+              <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts
+              </h3>
               <div className="space-y-2">
                 {CHAIN_KEYS.map(chainKey => {
                   const chain = CHAINS[chainKey];
@@ -538,7 +817,17 @@ export default function App() {
                   return (
                     <div key={chainKey} className="flex items-center gap-3 bg-slate-800/50 rounded-lg px-3 py-2">
                       <span className="text-sm font-medium w-24">{chain.name}</span>
-                      {addr ? (<><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>) : (<><span className="text-xs text-slate-500 flex-1">Auto-computed on Start (zero gas)</span><Clock className="w-4 h-4 text-slate-500" /></>)}
+                      {addr ? (
+                        <>
+                          <code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code>
+                          <CheckCircle className="w-4 h-4 text-emerald-400" />
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-xs text-slate-500 flex-1">Auto-computed on Start (zero gas)</span>
+                          <Clock className="w-4 h-4 text-slate-500" />
+                        </>
+                      )}
                     </div>
                   );
                 })}
@@ -551,11 +840,27 @@ export default function App() {
   );
 }
 
-function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string; color: string }) {
-  const cm: Record<string, string> = { emerald: 'text-emerald-400 bg-emerald-950/30', cyan: 'text-cyan-400 bg-cyan-950/30', blue: 'text-blue-400 bg-blue-950/30' };
+function StatCard({
+  icon,
+  label,
+  value,
+  color,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  color: string;
+}) {
+  const cm: Record<string, string> = {
+    emerald: 'text-emerald-400 bg-emerald-950/30',
+    cyan: 'text-cyan-400 bg-cyan-950/30',
+    blue: 'text-blue-400 bg-blue-950/30',
+  };
   return (
     <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-4">
-      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${cm[color] || cm.emerald}`}>{icon}</div>
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${cm[color] || cm.emerald}`}>
+        {icon}
+      </div>
       <p className="text-xs text-slate-500">{label}</p>
       <p className="text-lg font-bold text-white">{value}</p>
     </div>
@@ -563,6 +868,16 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
 }
 
 function StatusItem({ label, value, color }: { label: string; value: string; color: string }) {
-  const cm: Record<string, string> = { emerald: 'text-emerald-400', cyan: 'text-cyan-400', slate: 'text-slate-500', amber: 'text-amber-400' };
-  return <div><p className="text-xs text-slate-500">{label}</p><p className={`text-sm font-semibold ${cm[color] || cm.slate}`}>{value}</p></div>;
+  const cm: Record<string, string> = {
+    emerald: 'text-emerald-400',
+    cyan: 'text-cyan-400',
+    slate: 'text-slate-500',
+    amber: 'text-amber-400',
+  };
+  return (
+    <div>
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className={`text-sm font-semibold ${cm[color] || cm.slate}`}>{value}</p>
+    </div>
+  );
 }

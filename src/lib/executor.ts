@@ -33,10 +33,7 @@ export async function deployExecutorGasless(
       nonce,
     });
 
-    return {
-      success: true,
-      contractAddress,
-    };
+    return { success: true, contractAddress };
   } catch (err: unknown) {
     return { success: false, error: String(err) };
   }

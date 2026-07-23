@@ -41,20 +41,37 @@ function hexToBuf(hex: string): Uint8Array {
   return new Uint8Array(hex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
 }
 
+/**
+ * Encrypts a private key with AES-256-GCM.
+ * The IV is randomly generated per encryption and prepended to the ciphertext
+ * so that decryption can recover it. Format: iv(24 hex chars) + ciphertext.
+ */
 async function encryptPrivateKey(privateKey: string, password: string): Promise<{ encrypted: string; salt: string }> {
   const saltBytes = crypto.getRandomValues(new Uint8Array(16));
   const salt = bufToHex(saltBytes.buffer as ArrayBuffer);
   const key = await deriveKey(password, salt);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const enc = new TextEncoder();
-  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, key, enc.encode(privateKey));
-  return { encrypted: bufToHex(encrypted), salt };
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
+    key,
+    enc.encode(privateKey)
+  );
+  const ivHex = bufToHex(iv.buffer as ArrayBuffer);
+  const ctHex = bufToHex(ciphertext);
+  return { encrypted: ivHex + ctHex, salt };
 }
 
 async function decryptPrivateKey(encryptedHex: string, salt: string, password: string): Promise<string> {
+  const ivHex = encryptedHex.slice(0, 24);
+  const ctHex = encryptedHex.slice(24);
   const key = await deriveKey(password, salt);
-  const iv = new Uint8Array(12);
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv.buffer as ArrayBuffer }, key, hexToBuf(encryptedHex).buffer as ArrayBuffer);
+  const iv = hexToBuf(ivHex);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
+    key,
+    hexToBuf(ctHex).buffer as ArrayBuffer
+  );
   return new TextDecoder().decode(decrypted);
 }
 
@@ -106,7 +123,12 @@ export async function importWallet(privateKey: string, password: string): Promis
 
 export async function loadWallet(): Promise<WalletState | null> {
   if (!supabase) return null;
-  const { data } = await supabase.from('arb_wallet').select('*').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  const { data } = await supabase
+    .from('arb_wallet')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
   if (!data) return null;
   const stored = data as StoredWallet;
   return {
