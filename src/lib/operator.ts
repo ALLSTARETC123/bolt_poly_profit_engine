@@ -231,3 +231,63 @@ export async function fetchTreasurySummary(): Promise<{ totalProfit: number; tot
   }
   return summary;
 }
+
+export async function ensureEngineStatusRows(): Promise<void> {
+  if (!supabase) return;
+  const chains = ['polygon', 'arbitrum', 'optimism', 'base'];
+  for (const chain of chains) {
+    const { data } = await supabase.from('arb_engine_status').select('id').eq('chain', chain).maybeSingle();
+    if (!data) {
+      await supabase.from('arb_engine_status').insert({
+        chain, status: 'idle', opportunities_found: 0, trades_executed: 0,
+      });
+    }
+  }
+}
+
+const DEFAULT_OPERATOR_CONFIG: { key: string; value: string; description: string }[] = [
+  { key: 'min_profit_usd', value: '0.10', description: 'Minimum net profit threshold in USD' },
+  { key: 'max_flash_loan_usd', value: '50000', description: 'Maximum flash loan amount in USD' },
+  { key: 'min_confidence_score', value: '0.65', description: 'Minimum confidence score to execute' },
+  { key: 'max_price_impact_pct', value: '2.0', description: 'Maximum acceptable price impact percentage' },
+  { key: 'auto_execute', value: 'true', description: 'Automatically execute profitable opportunities' },
+  { key: 'gas_price_multiplier', value: '1.1', description: 'Gas price multiplier for execution' },
+  { key: 'slippage_tolerance_bps', value: '50', description: 'Slippage tolerance in basis points' },
+  { key: 'flash_loan_provider', value: 'balancer', description: 'Flash loan provider (balancer/aave)' },
+  { key: 'profit_split_owner_pct', value: '85', description: 'Percentage of profit to owner' },
+  { key: 'profit_split_gelato_pct', value: '5', description: 'Percentage of profit to Gelato' },
+  { key: 'profit_split_reserve_pct', value: '10', description: 'Percentage of profit to reserve' },
+  { key: 'scan_interval_ms', value: '5000', description: 'Scanner interval in milliseconds' },
+];
+
+const DEFAULT_ARB_CONFIG: { key: string; value: string; description: string }[] = [
+  { key: 'supported_chains', value: 'polygon,arbitrum,optimism,base', description: 'Comma-separated list of supported chains' },
+  { key: 'supported_dexs', value: 'uniswap_v3,sushiswap,quickswap', description: 'Comma-separated list of supported DEXs' },
+  { key: 'v3_fee_tiers', value: '500,3000,10000', description: 'Uniswap V3 fee tiers to scan' },
+  { key: 'token_pairs', value: 'WETH-USDC,WETH-USDT,WETH-DAI,WBTC-WETH,USDC-USDT,USDC-DAI,USDT-DAI', description: 'Token pairs to scan' },
+  { key: 'sample_amount_usd', value: '1000', description: 'Sample amount in USD for price quotes' },
+  { key: 'min_spread_pct', value: '0.05', description: 'Minimum spread percentage to consider' },
+  { key: 'flash_loan_fee_bps', value: '0', description: 'Balancer flash loan fee in basis points' },
+  { key: 'gelato_fee_pct', value: '5', description: 'Gelato fee percentage' },
+  { key: 'max_blocks_old', value: '3', description: 'Maximum blocks before opportunity expires' },
+  { key: 'rpc_timeout_ms', value: '10000', description: 'RPC call timeout in milliseconds' },
+  { key: 'execution_gas_limit', value: '450000', description: 'Gas limit for execution transactions' },
+  { key: 'treasury_min_balance_usd', value: '10', description: 'Minimum treasury balance for withdrawal' },
+  { key: 'enable_triangular', value: 'true', description: 'Enable triangular arbitrage detection' },
+];
+
+export async function ensureConfigRows(): Promise<void> {
+  if (!supabase) return;
+  for (const cfg of DEFAULT_OPERATOR_CONFIG) {
+    const { data } = await supabase.from('operator_config').select('key').eq('key', cfg.key).maybeSingle();
+    if (!data) {
+      await supabase.from('operator_config').insert(cfg);
+    }
+  }
+  for (const cfg of DEFAULT_ARB_CONFIG) {
+    const { data } = await supabase.from('arb_config').select('key').eq('key', cfg.key).maybeSingle();
+    if (!data) {
+      await supabase.from('arb_config').insert(cfg);
+    }
+  }
+}

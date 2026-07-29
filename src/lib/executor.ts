@@ -90,7 +90,7 @@ export async function executeArbitrageGasless(
     const result = await resp.json();
     if (!result.success) return { success: false, error: result.error || 'Execution failed' };
 
-    return { success: true, taskId: result.taskId, txHash: result.txHash, profitUsd: opportunity.netProfit, gasCostUsd: opportunity.estimatedGasCost };
+    return { success: true, taskId: result.taskId, txHash: result.txHash, profitUsd: undefined, gasCostUsd: undefined };
   } catch (err: unknown) {
     return { success: false, error: String(err) };
   }

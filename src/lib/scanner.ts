@@ -13,10 +13,8 @@ export interface PoolPrice {
 export interface ArbitrageOpportunity {
   id: string;
   chain: string;
-  opportunityType: 'triangular' | 'cross-dex';
   tokenPath: string[];
   dexPath: string[];
-  poolAddresses: string[];
   flashLoanAsset: string;
   flashLoanAmount: number;
   estimatedProfit: number;
@@ -25,9 +23,10 @@ export interface ArbitrageOpportunity {
   profitMarginPct: number;
   confidenceScore: number;
   blockNumber: number;
-  poolReserves: Record<string, string>;
   priceImpact: number;
-  v3Fees: number[];
+  buyDex: string;
+  sellDex: string;
+  spreadPct: number;
 }
 
 export interface ScanResult {
@@ -36,6 +35,7 @@ export interface ScanResult {
   opportunities: ArbitrageOpportunity[];
   scanTimeMs: number;
   poolPrices: PoolPrice[];
+  tokenPrices: Record<string, number>;
   error?: string;
 }
 
@@ -74,13 +74,17 @@ const ERC20_DECIMALS_ABI = [
 ];
 
 const DEX_NAMES_V2 = ['sushi', 'quickswap'];
-
 const SAMPLE_AMOUNT_USD = 1000;
-const RPC_TIMEOUT_MS = 8000;
+const FLASH_LOAN_USD = 50000;
+const RPC_TIMEOUT_MS = 10000;
 
-const TOKEN_PRICE_USD: Record<string, number> = {
-  WETH: 3200, USDC: 1, USDT: 1, DAI: 1, WBTC: 62000, WMATIC: 0.8,
-};
+function isZero(addr: string): boolean {
+  return !addr || addr === '0x0000000000000000000000000000000000000000';
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
 
 function getProvider(chainKey: string): ethers.JsonRpcProvider {
   const chain = CHAINS[chainKey];
@@ -88,126 +92,141 @@ function getProvider(chainKey: string): ethers.JsonRpcProvider {
     chainId: chain.chainId,
     name: chain.name,
     ensAddress: undefined,
-  }, {
-    staticNetwork: true,
-    batchStallTime: 0,
-  });
+  }, { staticNetwork: true, batchStallTime: 0 });
 }
 
-function isZeroAddress(addr: string): boolean {
-  return !addr || addr === '0x0000000000000000000000000000000000000000';
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-  ]);
-}
-
-async function getTokenDecimals(provider: ethers.JsonRpcProvider, tokenAddress: string): Promise<number> {
-  if (isZeroAddress(tokenAddress)) return 18;
+async function getDecimals(provider: ethers.JsonRpcProvider, addr: string): Promise<number> {
+  if (isZero(addr)) return 18;
   try {
-    const contract = new ethers.Contract(tokenAddress, ERC20_DECIMALS_ABI, provider);
-    const decimals = await withTimeout(contract.decimals(), RPC_TIMEOUT_MS);
-    return Number(decimals);
-  } catch {
-    return 18;
-  }
+    const c = new ethers.Contract(addr, ERC20_DECIMALS_ABI, provider);
+    return Number(await withTimeout(c.decimals(), RPC_TIMEOUT_MS));
+  } catch { return 18; }
 }
 
-function usdToAmount(usd: number, decimals: number, priceUsd: number): bigint {
-  const tokenAmount = usd / priceUsd;
-  return ethers.parseUnits(tokenAmount.toFixed(Math.min(decimals, 6)), decimals);
-}
-
-function amountToUsd(amount: bigint, decimals: number, priceUsd: number): number {
-  return Number(ethers.formatUnits(amount, decimals)) * priceUsd;
-}
-
-async function fetchV3Quote(
-  provider: ethers.JsonRpcProvider,
-  chainKey: string,
-  tokenIn: string,
-  tokenOut: string,
-  fee: number,
-  amountIn: bigint
-): Promise<bigint | null> {
+async function v3Quote(provider: ethers.JsonRpcProvider, chainKey: string, tokenIn: string, tokenOut: string, fee: number, amountIn: bigint): Promise<bigint | null> {
   const chain = CHAINS[chainKey];
-  if (isZeroAddress(chain.uniswapV3Quoter)) return null;
+  if (isZero(chain.uniswapV3Quoter)) return null;
   try {
-    const quoter = new ethers.Contract(chain.uniswapV3Quoter, V3_QUOTER_ABI, provider);
-    const amountOut = await withTimeout(
-      quoter.quoteExactInputSingle.staticCall(tokenIn, tokenOut, fee, amountIn, 0),
-      RPC_TIMEOUT_MS
-    );
-    return amountOut as bigint;
-  } catch {
-    return null;
-  }
+    const q = new ethers.Contract(chain.uniswapV3Quoter, V3_QUOTER_ABI, provider);
+    const out = await withTimeout(q.quoteExactInputSingle.staticCall(tokenIn, tokenOut, fee, amountIn, 0n), RPC_TIMEOUT_MS);
+    return out as bigint;
+  } catch { return null; }
 }
 
-async function fetchV2Quote(
-  provider: ethers.JsonRpcProvider,
-  routerAddress: string,
-  tokenIn: string,
-  tokenOut: string,
-  amountIn: bigint
-): Promise<bigint | null> {
-  if (isZeroAddress(routerAddress)) return null;
+async function v2Quote(provider: ethers.JsonRpcProvider, routerAddr: string, tokenIn: string, tokenOut: string, amountIn: bigint): Promise<bigint | null> {
+  if (isZero(routerAddr)) return null;
   try {
-    const router = new ethers.Contract(routerAddress, V2_ROUTER_ABI, provider);
-    const amounts = await withTimeout(router.getAmountsOut(amountIn, [tokenIn, tokenOut]), RPC_TIMEOUT_MS);
+    const r = new ethers.Contract(routerAddr, V2_ROUTER_ABI, provider);
+    const amounts = await withTimeout(r.getAmountsOut(amountIn, [tokenIn, tokenOut]), RPC_TIMEOUT_MS);
     return amounts[1] as bigint;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-async function scanChainPrices(chainKey: string): Promise<{ prices: PoolPrice[]; blockNumber: number; scanTimeMs: number }> {
+async function getGasCostUsd(provider: ethers.JsonRpcProvider, chainKey: string): Promise<number> {
+  try {
+    const feeData = await withTimeout(provider.getFeeData(), RPC_TIMEOUT_MS);
+    const gasPrice = feeData.gasPrice || 0n;
+    const nativeUsd = await getNativePriceUsd(provider, chainKey);
+    const gasWei = gasPrice * 450000n;
+    return Number(ethers.formatEther(gasWei)) * nativeUsd;
+  } catch { return 0.5; }
+}
+
+async function getNativePriceUsd(provider: ethers.JsonRpcProvider, chainKey: string): Promise<number> {
+  const chain = CHAINS[chainKey];
+  const weth = chain.wethAddress;
+  const usdc = chain.usdcAddress;
+  if (isZero(weth) || isZero(usdc)) return 1;
+  try {
+    const sample = ethers.parseUnits('1', 6);
+    for (const fee of V3_FEES) {
+      const out = await v3Quote(provider, chainKey, usdc, weth, fee, sample);
+      if (out && out > 0n) {
+        const dec = await getDecimals(provider, weth);
+        const wethPerUsdc = Number(ethers.formatUnits(out, dec));
+        return wethPerUsdc > 0 ? 1 / wethPerUsdc : 1;
+      }
+    }
+  } catch { /* fall through */ }
+  return 1;
+}
+
+async function derivePriceUsd(provider: ethers.JsonRpcProvider, chainKey: string, sym: string, addr: string, dec: number): Promise<number> {
+  if (sym === 'USDC' || sym === 'USDT' || sym === 'DAI') return 1;
+  const chain = CHAINS[chainKey];
+  if (isZero(addr) || isZero(chain.usdcAddress)) return 0;
+  try {
+    const sample = ethers.parseUnits('1', dec);
+    for (const fee of V3_FEES) {
+      const out = await v3Quote(provider, chainKey, addr, chain.usdcAddress, fee, sample);
+      if (out && out > 0n) return Number(ethers.formatUnits(out, 6));
+    }
+  } catch { /* fall through */ }
+  return 0;
+}
+
+async function scanChain(chainKey: string): Promise<ScanResult> {
   const start = Date.now();
   const provider = getProvider(chainKey);
-  const blockNumber = await withTimeout(provider.getBlockNumber(), RPC_TIMEOUT_MS);
+  let blockNumber = 0;
+  try {
+    blockNumber = await withTimeout(provider.getBlockNumber(), RPC_TIMEOUT_MS);
+  } catch { /* continue even if block fetch fails */ }
+
   const prices: PoolPrice[] = [];
+  const tokenPrices: Record<string, number> = {};
+  const decimals: Record<string, number> = {};
 
-  for (const [tokenInSym, tokenOutSym] of TOKEN_PAIRS) {
-    const tokenIn = getTokenAddress(chainKey, tokenInSym);
-    const tokenOut = getTokenAddress(chainKey, tokenOutSym);
-    if (isZeroAddress(tokenIn) || isZeroAddress(tokenOut)) continue;
+  for (const sym of ['WETH', 'USDC', 'USDT', 'DAI', 'WBTC']) {
+    const addr = getTokenAddress(chainKey, sym);
+    if (isZero(addr)) continue;
+    const dec = await getDecimals(provider, addr);
+    decimals[sym] = dec;
+    tokenPrices[sym] = await derivePriceUsd(provider, chainKey, sym, addr, dec);
+  }
 
-    const decimalsIn = await getTokenDecimals(provider, tokenIn);
-    const decimalsOut = await getTokenDecimals(provider, tokenOut);
-    const priceInUsd = TOKEN_PRICE_USD[tokenInSym] || 1;
-    const sampleAmount = usdToAmount(SAMPLE_AMOUNT_USD, decimalsIn, priceInUsd);
+  const gasCostUsd = await getGasCostUsd(provider, chainKey);
+
+  for (const [tIn, tOut] of TOKEN_PAIRS) {
+    const addrIn = getTokenAddress(chainKey, tIn);
+    const addrOut = getTokenAddress(chainKey, tOut);
+    if (isZero(addrIn) || isZero(addrOut)) continue;
+
+    const decIn = decimals[tIn] || 18;
+    const decOut = decimals[tOut] || 18;
+    const priceIn = tokenPrices[tIn] || 0;
+    const priceOut = tokenPrices[tOut] || 0;
+    if (priceIn <= 0) continue;
+
+    const sampleAmt = ethers.parseUnits((SAMPLE_AMOUNT_USD / priceIn).toFixed(Math.min(decIn, 6)), decIn);
 
     for (const fee of V3_FEES) {
-      const amountOut = await fetchV3Quote(provider, chainKey, tokenIn, tokenOut, fee, sampleAmount);
-      if (amountOut && amountOut > 0n) {
-        const outUsd = amountToUsd(amountOut, decimalsOut, TOKEN_PRICE_USD[tokenOutSym] || 1);
-        const price = outUsd / SAMPLE_AMOUNT_USD;
-        prices.push({ tokenIn: tokenInSym, tokenOut: tokenOutSym, dex: 'uniswap_v3', fee, price, liquidity: Number(ethers.formatUnits(amountOut, decimalsOut)) });
+      const out = await v3Quote(provider, chainKey, addrIn, addrOut, fee, sampleAmt);
+      if (out && out > 0n) {
+        const outUsd = Number(ethers.formatUnits(out, decOut)) * priceOut;
+        prices.push({ tokenIn: tIn, tokenOut: tOut, dex: 'uniswap_v3', fee, price: outUsd / SAMPLE_AMOUNT_USD, liquidity: Number(ethers.formatUnits(out, decOut)) });
       }
     }
 
-    for (const dexName of DEX_NAMES_V2) {
-      const routerAddr = dexName === 'sushi' ? CHAINS[chainKey].sushiRouter : CHAINS[chainKey].quickswapRouter;
-      const amountOut = await fetchV2Quote(provider, routerAddr, tokenIn, tokenOut, sampleAmount);
-      if (amountOut && amountOut > 0n) {
-        const outUsd = amountToUsd(amountOut, decimalsOut, TOKEN_PRICE_USD[tokenOutSym] || 1);
-        const price = outUsd / SAMPLE_AMOUNT_USD;
-        prices.push({ tokenIn: tokenInSym, tokenOut: tokenOutSym, dex: dexName, fee: 3000, price, liquidity: Number(ethers.formatUnits(amountOut, decimalsOut)) });
+    for (const dex of DEX_NAMES_V2) {
+      const router = dex === 'sushi' ? CHAINS[chainKey].sushiRouter : CHAINS[chainKey].quickswapRouter;
+      const out = await v2Quote(provider, router, addrIn, addrOut, sampleAmt);
+      if (out && out > 0n) {
+        const outUsd = Number(ethers.formatUnits(out, decOut)) * priceOut;
+        prices.push({ tokenIn: tIn, tokenOut: tOut, dex, fee: 3000, price: outUsd / SAMPLE_AMOUNT_USD, liquidity: Number(ethers.formatUnits(out, decOut)) });
       }
     }
   }
 
-  return { prices, blockNumber, scanTimeMs: Date.now() - start };
+  const opps = findOpps(chainKey, blockNumber, prices, gasCostUsd, tokenPrices);
+  return { chain: chainKey, blockNumber, opportunities: opps, scanTimeMs: Date.now() - start, poolPrices: prices, tokenPrices };
 }
 
-function findArbitrageOpportunities(chainKey: string, blockNumber: number, prices: PoolPrice[]): ArbitrageOpportunity[] {
+function findOpps(chainKey: string, blockNumber: number, prices: PoolPrice[], gasCostUsd: number, tokenPrices: Record<string, number>): ArbitrageOpportunity[] {
   const opps: ArbitrageOpportunity[] = [];
 
-  for (const [tokenInSym, tokenOutSym] of TOKEN_PAIRS) {
-    const matching = prices.filter(p => p.tokenIn === tokenInSym && p.tokenOut === tokenOutSym);
+  for (const [tIn, tOut] of TOKEN_PAIRS) {
+    const matching = prices.filter(p => p.tokenIn === tIn && p.tokenOut === tOut);
     if (matching.length < 2) continue;
 
     matching.sort((a, b) => b.price - a.price);
@@ -218,30 +237,31 @@ function findArbitrageOpportunities(chainKey: string, blockNumber: number, price
     const spreadPct = ((best.price - worst.price) / worst.price) * 100;
     if (spreadPct < 0.05) continue;
 
-    const flashAmount = Math.min(50000, Math.max(1000, SAMPLE_AMOUNT_USD * 100));
-    const grossProfit = flashAmount * (spreadPct / 100) * 0.5;
-    const gasCost = 0.3 + (chainKey === 'arbitrum' ? 0.1 : 0.5);
-    const netProfit = grossProfit - gasCost;
+    const grossProfit = FLASH_LOAN_USD * (spreadPct / 100) * 0.5;
+    const netProfit = grossProfit - gasCostUsd;
     if (netProfit <= 0.01) continue;
 
+    const minLiq = Math.min(best.liquidity, worst.liquidity);
+    const priceImpact = minLiq > 0 ? (FLASH_LOAN_USD / (minLiq * (tokenPrices[tIn] || 1))) * 100 : 0;
+    const confidence = Math.min(0.95, 0.5 + Math.min(spreadPct / 3, 0.3) + Math.min(minLiq / 100000, 0.15));
+
     opps.push({
-      id: `${chainKey}-${blockNumber}-xd-${tokenInSym}-${tokenOutSym}`,
+      id: `${chainKey}-${blockNumber}-${tIn}-${tOut}`,
       chain: chainKey,
-      opportunityType: 'cross-dex',
-      tokenPath: [tokenInSym, tokenOutSym, tokenInSym],
+      tokenPath: [tIn, tOut, tIn],
       dexPath: [best.dex, worst.dex],
-      poolAddresses: [],
-      flashLoanAsset: getTokenAddress(chainKey, tokenInSym),
-      flashLoanAmount: flashAmount,
+      flashLoanAsset: getTokenAddress(chainKey, tIn),
+      flashLoanAmount: FLASH_LOAN_USD,
       estimatedProfit: grossProfit,
-      estimatedGasCost: gasCost,
+      estimatedGasCost: gasCostUsd,
       netProfit,
-      profitMarginPct: (netProfit / flashAmount) * 100,
-      confidenceScore: Math.min(0.95, 0.65 + spreadPct / 5),
+      profitMarginPct: (netProfit / FLASH_LOAN_USD) * 100,
+      confidenceScore: confidence,
       blockNumber,
-      poolReserves: {},
-      priceImpact: spreadPct * 0.05,
-      v3Fees: [best.fee, worst.fee],
+      priceImpact: Math.min(priceImpact, 100),
+      buyDex: worst.dex,
+      sellDex: best.dex,
+      spreadPct,
     });
   }
 
@@ -250,16 +270,12 @@ function findArbitrageOpportunities(chainKey: string, blockNumber: number, price
 
 export async function scanAllChains(): Promise<ScanResult[]> {
   const results: ScanResult[] = [];
-
   for (const chainKey of CHAIN_KEYS) {
     try {
-      const { prices, blockNumber, scanTimeMs } = await scanChainPrices(chainKey);
-      const opportunities = findArbitrageOpportunities(chainKey, blockNumber, prices);
-      results.push({ chain: chainKey, blockNumber, opportunities, scanTimeMs, poolPrices: prices });
+      results.push(await scanChain(chainKey));
     } catch (err: unknown) {
-      results.push({ chain: chainKey, blockNumber: 0, opportunities: [], scanTimeMs: 0, poolPrices: [], error: String(err) });
+      results.push({ chain: chainKey, blockNumber: 0, opportunities: [], scanTimeMs: 0, poolPrices: [], tokenPrices: {}, error: String(err) });
     }
   }
-
   return results;
 }
