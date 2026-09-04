@@ -35,7 +35,7 @@ export interface StatArbModel {
 }
 
 const MAX_WINDOW = 200;
-const MIN_SAMPLES = 20;
+const MIN_SAMPLES = 50;
 const ENTRY_Z = 2.0;
 const EXIT_Z = 0.5;
 const MAX_Z = 5.0;

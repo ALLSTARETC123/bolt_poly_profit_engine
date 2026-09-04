@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { CHAINS, getAlchemyRpcUrl } from './chains';
+import { CHAINS, getAlchemyRpcUrl, LONG_TAIL_TOKENS } from './chains';
 import { supabase } from './supabase';
 
 export interface ExecutionResult {
@@ -110,7 +110,8 @@ export async function executeArbitrage(
       if (t === 'USDT') return chain.usdtAddress;
       if (t === 'DAI') return chain.daiAddress;
       if (t === 'WBTC') return chain.wbtcAddress;
-      return '';
+      const longTail = LONG_TAIL_TOKENS.find(lt => lt.chain === chainKey && lt.symbol === t);
+      return longTail?.address || '';
     });
 
     const params = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -118,7 +119,12 @@ export async function executeArbitrage(
       [0, '0x0000000000000000000000000000000000000000', dexPath, tokenAddresses, [3000, 3000, 3000]]
     );
 
-    const amountWei = ethers.parseUnits(flashLoanAmount.toString(), 6);
+    const flashLoanDecimals = flashLoanAsset === chain.usdcAddress || flashLoanAsset === chain.usdtAddress ? 6
+      : flashLoanAsset === chain.daiAddress ? 18
+      : flashLoanAsset === chain.wethAddress ? 18
+      : flashLoanAsset === chain.wbtcAddress ? 8
+      : 18;
+    const amountWei = ethers.parseUnits(flashLoanAmount.toString(), flashLoanDecimals);
     const tx = await executor.executeArb(flashLoanAsset, amountWei, params, { gasLimit: 500000, chainId: CHAINS[chainKey].chainId });
     const receipt = await tx.wait();
     return { success: receipt?.status === 1, txHash: tx.hash };

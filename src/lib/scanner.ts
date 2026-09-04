@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { CHAINS, CHAIN_KEYS, TOKEN_PAIRS, V3_FEES, getTokenAddress, LONG_TAIL_TOKENS, getAlchemyRpcUrl } from './chains';
-import { recordSpread, getAllSignals, type ZScoreSignal } from './statArb';
+import { recordSpread, getAllSignals, getZScoreSignal, type ZScoreSignal } from './statArb';
 import { getAlchemyConfig } from './executor';
 
 export interface PoolPrice {
@@ -226,14 +226,18 @@ function findCrossDexOpps(chainKey: string, blockNumber: number, prices: PoolPri
     const minLiq = Math.min(best.liquidity, worst.liquidity);
     const priceImpact = minLiq > 0 ? (FLASH_LOAN_USD / (minLiq * (tokenPrices[tIn] || 1))) * 100 : 0;
     const confidence = Math.min(0.95, 0.5 + Math.min(spreadPct / 3, 0.3) + Math.min(minLiq / 100000, 0.15));
+    const signal = getZScoreSignal(chainKey, `${tIn}-${tOut}`);
     opps.push({
       id: `${chainKey}-${blockNumber}-${tIn}-${tOut}`, chain: chainKey,
       tokenPath: [tIn, tOut, tIn], dexPath: [best.dex, worst.dex],
       flashLoanAsset: getTokenAddress(chainKey, tIn), flashLoanAmount: FLASH_LOAN_USD,
       estimatedProfit: grossProfit, estimatedGasCost: gasCostUsd, netProfit,
-      profitMarginPct: (netProfit / FLASH_LOAN_USD) * 100, confidenceScore: confidence,
+      profitMarginPct: (netProfit / FLASH_LOAN_USD) * 100,
+      confidenceScore: signal ? signal.confidence : confidence,
       blockNumber, priceImpact: Math.min(priceImpact, 100),
-      buyDex: worst.dex, sellDex: best.dex, spreadPct, strategy: 'cross_dex',
+      buyDex: worst.dex, sellDex: best.dex, spreadPct,
+      strategy: signal ? 'statistical' : 'cross_dex',
+      ...(signal ? { zScore: signal.zScore, signalType: signal.signalType } : {}),
     });
   }
   return opps;
@@ -258,10 +262,12 @@ async function scanLongTailTokens(chainKey: string, provider: ethers.JsonRpcProv
       const sushiUsd = Number(ethers.formatUnits(sushiOut, 6));
       if (v3Usd <= 0 || sushiUsd <= 0) continue;
       const spreadPct = Math.abs(v3Usd - sushiUsd) / Math.min(v3Usd, sushiUsd) * 100;
+      recordSpread(chainKey, token.symbol, spreadPct);
       if (spreadPct < 0.1) continue;
       const grossProfit = FLASH_LOAN_USD * (spreadPct / 100) * 0.3;
       const netProfit = grossProfit - gasCostUsd;
       if (netProfit <= 0.01) continue;
+      const signal = getZScoreSignal(chainKey, token.symbol);
       opps.push({
         id: `lt-${chainKey}-${blockNumber}-${token.symbol}`,
         chain: chainKey,
@@ -270,11 +276,13 @@ async function scanLongTailTokens(chainKey: string, provider: ethers.JsonRpcProv
         flashLoanAsset: chain.usdcAddress, flashLoanAmount: FLASH_LOAN_USD,
         estimatedProfit: grossProfit, estimatedGasCost: gasCostUsd, netProfit,
         profitMarginPct: (netProfit / FLASH_LOAN_USD) * 100,
-        confidenceScore: Math.min(0.7, 0.3 + spreadPct / 10),
+        confidenceScore: signal ? signal.confidence : Math.min(0.7, 0.3 + spreadPct / 10),
         blockNumber, priceImpact: 1.0,
         buyDex: v3Usd > sushiUsd ? 'sushi' : 'uniswap_v3',
         sellDex: v3Usd > sushiUsd ? 'uniswap_v3' : 'sushi',
-        spreadPct, strategy: 'long_tail',
+        spreadPct,
+        strategy: signal ? 'statistical' : 'long_tail',
+        ...(signal ? { zScore: signal.zScore, signalType: signal.signalType } : {}),
       });
     }
   }

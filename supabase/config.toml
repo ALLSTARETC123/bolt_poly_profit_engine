@@ -1,0 +1,5 @@
+[functions.alchemy-relayer]
+verify_jwt = false
+
+[functions.relayer]
+verify_jwt = true
