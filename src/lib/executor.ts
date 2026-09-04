@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { CHAINS, getAlchemyRpcUrl, LONG_TAIL_TOKENS } from './chains';
+import { CHAINS, getAlchemyRpcUrl, getFlashbotsProvider, LONG_TAIL_TOKENS } from './chains';
 import { supabase } from './supabase';
 
 export interface ExecutionResult {
@@ -125,9 +125,43 @@ export async function executeArbitrage(
       : flashLoanAsset === chain.wbtcAddress ? 8
       : 18;
     const amountWei = ethers.parseUnits(flashLoanAmount.toString(), flashLoanDecimals);
-    const tx = await executor.executeArb(flashLoanAsset, amountWei, params, { gasLimit: 500000, chainId: CHAINS[chainKey].chainId });
-    const receipt = await tx.wait();
-    return { success: receipt?.status === 1, txHash: tx.hash };
+
+    const populatedTx = await executor.executeArb.populateTransaction(flashLoanAsset, amountWei, params);
+    populatedTx.gasLimit = 500000;
+    populatedTx.chainId = CHAINS[chainKey].chainId;
+
+    const signedTx = await connectedSigner.signTransaction(populatedTx);
+
+    let txHash: string | undefined;
+    try {
+      const flashbotsUrl = getFlashbotsProvider(chainKey);
+      const flashbotsResp = await fetch(flashbotsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'eth_sendRawTransaction',
+          params: [signedTx],
+        }),
+      });
+      const flashbotsResult = await flashbotsResp.json();
+      if (!flashbotsResult.error && flashbotsResult.result) {
+        txHash = flashbotsResult.result;
+      }
+    } catch { /* fall through to standard RPC */ }
+
+    if (!txHash) {
+      const tx = await connectedSigner.sendTransaction(populatedTx);
+      const receipt = await tx.wait();
+      return { success: receipt?.status === 1, txHash: tx.hash };
+    }
+
+    let confirmed = false;
+    for (let i = 0; i < 12; i++) {
+      await new Promise<void>(r => setTimeout(r, 2000));
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (receipt) { confirmed = receipt.status === 1; break; }
+    }
+    return { success: confirmed, txHash };
   } catch (err: unknown) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
