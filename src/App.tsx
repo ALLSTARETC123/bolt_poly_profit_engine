@@ -5,6 +5,7 @@ import {
   CheckCircle, AlertTriangle, Rocket, Zap,
   ExternalLink, Copy, ArrowRight, CheckCircle2, LogOut, Mail, Lock,
   Coins, DollarSign, Cpu, Eye, EyeOff, Sparkles, Droplet, Fuel,
+  BarChart3, Target, Settings, Bug, KeyRound, Shield,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { CHAINS, CHAIN_KEYS, SCAN_INTERVAL_MS } from './lib/chains';
@@ -14,20 +15,21 @@ import {
   updateDeployedContracts, getDeployedContracts, type WalletState,
 } from './lib/wallet';
 import {
-  deployExecutorViaGelato, executeArbitrageGasless, getTaskStatus, checkGelatoHealth,
-  type ExecutionResult,
+  deployExecutor, executeArbitrage, checkAlchemyHealth, setAlchemyConfig,
+  getAlchemyConfig, type ExecutionResult,
 } from './lib/executor';
 import {
   fetchTreasuryRecords, fetchExecutionRecords, fetchOpportunityRecords,
   fetchEngineStatus, insertOpportunity, insertExecution, updateExecutionStatus,
   insertTreasuryEntry, updateEngineStatus, incrementEngineTrades,
   fetchTreasurySummary, ensureEngineStatusRows, ensureConfigRows,
+  fetchOperatorConfig,
   type TreasuryRecord, type ExecutionRecord, type OpportunityRecord,
   type EngineStatusRecord,
 } from './lib/operator';
+import { getModelStats, type ZScoreSignal } from './lib/statArb';
 
 interface AlertItem { id: string; type: 'success' | 'error' | 'warning' | 'info'; message: string; timestamp: number; }
-type Step = 1 | 2 | 3 | 4;
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -45,28 +47,31 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  const [setupStep, setSetupStep] = useState<Step>(1);
   const [engineRunning, setEngineRunning] = useState(false);
   const [autoExecute, setAutoExecute] = useState(true);
   const [minProfit, setMinProfit] = useState('0.10');
+  const [alchemyApiKey, setAlchemyApiKey] = useState('');
+  const [alchemyPolicyId, setAlchemyPolicyId] = useState('');
+  const [alchemyStatus, setAlchemyStatus] = useState<{ configured: boolean; mode: string; paymasterPolicyId?: string } | null>(null);
 
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [allOpportunities, setAllOpportunities] = useState<ArbitrageOpportunity[]>([]);
   const [executing, setExecuting] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployedContracts, setDeployedContracts] = useState<Record<string, string>>({});
+  const [setupComplete, setSetupComplete] = useState(false);
 
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [scanCount, setScanCount] = useState(0);
   const [totalProfit, setTotalProfit] = useState(0);
   const [executedCount, setExecutedCount] = useState(0);
-  const [gelatoStatus, setGelatoStatus] = useState<{ configured: boolean; mode: string } | null>(null);
 
   const [treasuryRecords, setTreasuryRecords] = useState<TreasuryRecord[]>([]);
   const [executionRecords, setExecutionRecords] = useState<ExecutionRecord[]>([]);
   const [opportunityRecords, setOpportunityRecords] = useState<OpportunityRecord[]>([]);
   const [engineStatusRecords, setEngineStatusRecords] = useState<EngineStatusRecord[]>([]);
   const [treasurySummary, setTreasurySummary] = useState({ totalProfit: 0, totalGas: 0, totalFlashFee: 0, totalDeploy: 0 });
+  const [statArbStats, setStatArbStats] = useState<{ pair: string; chain: string; samples: number; mean: number; stdDev: number; currentZ: number }[]>([]);
 
   const scanIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -85,6 +90,7 @@ export default function App() {
     setEngineStatusRecords(status);
     setTreasurySummary(summary);
     setTotalProfit(summary.totalProfit);
+    setStatArbStats(getModelStats());
   }, []);
 
   useEffect(() => {
@@ -112,13 +118,16 @@ export default function App() {
           const contracts = await getDeployedContracts(loaded.address);
           if (contracts && Object.keys(contracts).length > 0) {
             setDeployedContracts(contracts);
-            setSetupStep(3);
+            setSetupComplete(true);
           }
         }
       } catch { setWalletLoaded(true); }
       await refreshDbData();
-      const health = await checkGelatoHealth();
-      setGelatoStatus(health);
+      const health = await checkAlchemyHealth();
+      setAlchemyStatus(health);
+      const config = await getAlchemyConfig();
+      if (config?.apiKey) setAlchemyApiKey(config.apiKey);
+      if (config?.paymasterPolicyId) setAlchemyPolicyId(config.paymasterPolicyId);
     })();
   }, [refreshDbData, session]);
 
@@ -149,7 +158,7 @@ export default function App() {
     setWallet(null);
     setWalletLoaded(false);
     setEngineRunning(false);
-    setSetupStep(1);
+    setSetupComplete(false);
     if (scanIntervalRef.current) { clearInterval(scanIntervalRef.current); scanIntervalRef.current = null; }
   };
 
@@ -159,7 +168,6 @@ export default function App() {
       const ws = await generateWallet(password);
       setWallet(ws); setPassword('');
       pushAlert('success', `Wallet created: ${ws.address.slice(0, 10)}...`);
-      setSetupStep(2);
     } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
@@ -169,7 +177,6 @@ export default function App() {
       const ws = await importWallet(importKeyInput, password);
       setWallet(ws); setPassword(''); setImportKeyInput(''); setShowImport(false);
       pushAlert('success', `Wallet imported: ${ws.address.slice(0, 10)}...`);
-      setSetupStep(2);
     } catch (err: unknown) { pushAlert('error', String(err)); }
   };
 
@@ -182,30 +189,54 @@ export default function App() {
     } catch { pushAlert('error', 'Invalid password'); }
   };
 
-  const handleStart = async () => {
+  const handleSaveAlchemyKey = async () => {
+    if (!alchemyApiKey.trim()) { pushAlert('error', 'Enter your Alchemy API key'); return; }
+    try {
+      await setAlchemyConfig(alchemyApiKey.trim(), alchemyPolicyId.trim() || undefined);
+      const health = await checkAlchemyHealth();
+      setAlchemyStatus(health);
+      pushAlert('success', 'Alchemy API key saved');
+    } catch (err: unknown) { pushAlert('error', String(err)); }
+  };
+
+  const handleOneTapLaunch = async () => {
     if (!wallet?.signer) { pushAlert('error', 'Unlock your wallet first'); return; }
     setDeploying(true);
-    pushAlert('info', 'Deploying executor contracts via Gelato SyncFee...');
+    pushAlert('info', 'Launching: deploying contracts + starting scanner...');
+
+    const bytecodeResp = await fetch('/src/lib/FlashArbExecutor.bin.txt').then(r => r.text()).catch(() => '');
+    if (!bytecodeResp) { pushAlert('error', 'Cannot load contract bytecode'); setDeploying(false); return; }
+    const bytecode = bytecodeResp.trim();
 
     for (const chainKey of CHAIN_KEYS) {
-      if (!deployedContracts[chainKey]) {
-        const result = await deployExecutorViaGelato(wallet.signer!, chainKey);
-        if (result.success && result.contractAddress) {
-          const updated = { ...deployedContracts, [chainKey]: result.contractAddress };
+      if (deployedContracts[chainKey]) continue;
+      const chain = CHAINS[chainKey];
+      const constructorArgs = '0x' + 
+        chain.balancerVault.slice(2).padStart(64, '0') +
+        chain.uniswapV3Router.slice(2).padStart(64, '0') +
+        chain.usdcAddress.slice(2).padStart(64, '0') +
+        chain.alchemyPaymasterAddress.slice(2).padStart(64, '0');
+      const result = await deployExecutor(wallet.signer as never, chainKey, bytecode, constructorArgs);
+      if (result.success && result.txHash) {
+        const provider = new (await import('ethers')).JsonRpcProvider(chain.rpcUrl, { chainId: chain.chainId, name: chain.name }, { staticNetwork: true });
+        const receipt = await provider.getTransactionReceipt(result.txHash);
+        const addr = receipt?.contractAddress;
+        if (addr) {
+          const updated = { ...deployedContracts, [chainKey]: addr };
           setDeployedContracts(updated);
           await updateDeployedContracts(wallet.address, updated);
-          pushAlert('success', `Executor deployed on ${CHAINS[chainKey].name}`);
+          pushAlert('success', `Executor deployed on ${chain.name}`);
           await insertTreasuryEntry({ execution_id: null, amount_usd: 0, type: 'deployment', chain: chainKey });
-        } else {
-          pushAlert('warning', `Deploy on ${CHAINS[chainKey].name} pending: ${result.error?.slice(0, 80)}`);
         }
+      } else {
+        pushAlert('warning', `Deploy on ${chain.name} skipped: ${result.error?.slice(0, 80) || 'no gas'}`);
       }
     }
 
     setDeploying(false);
     setEngineRunning(true);
-    setSetupStep(4);
-    pushAlert('success', `Engine started — scanning real DEX prices every ${SCAN_INTERVAL_MS / 1000}s`);
+    setSetupComplete(true);
+    pushAlert('success', `Engine live — scanning real DEX prices every ${SCAN_INTERVAL_MS / 1000}s`);
     runScan();
     scanIntervalRef.current = setInterval(() => runScan(), SCAN_INTERVAL_MS);
   };
@@ -234,9 +265,9 @@ export default function App() {
         } else {
           await updateEngineStatus(result.chain, 'scanning', result.blockNumber, result.opportunities.length, result.scanTimeMs);
         }
-        for (const opp of result.opportunities) {
+        for (const opp of result.opportunities.slice(0, 5)) {
           await insertOpportunity({
-            chain: opp.chain, opportunity_type: 'cross-dex',
+            chain: opp.chain, opportunity_type: opp.strategy,
             token_path: opp.tokenPath, dex_path: opp.dexPath,
             pool_addresses: [], flash_loan_provider: 'balancer',
             flash_loan_asset: opp.flashLoanAsset, flash_loan_amount: opp.flashLoanAmount,
@@ -264,7 +295,7 @@ export default function App() {
     const executorAddress = deployedContracts[opp.chain];
     if (!executorAddress) { pushAlert('error', `No executor contract on ${opp.chain}`); return; }
     setExecuting(true);
-    pushAlert('info', `Executing arb on ${opp.chain}: ${opp.tokenPath.join(' -> ')}`);
+    pushAlert('info', `Executing ${opp.strategy} arb on ${opp.chain}: ${opp.tokenPath.join(' -> ')}`);
 
     const execId = await insertExecution({
       opportunity_id: null, chain: opp.chain, tx_hash: null,
@@ -275,7 +306,10 @@ export default function App() {
       executor_contract: executorAddress,
     });
 
-    const result: ExecutionResult = await executeArbitrageGasless(wallet.signer!, opp.chain, opp, executorAddress);
+    const result: ExecutionResult = await executeArbitrage(
+      wallet.signer as never, opp.chain, opp.tokenPath, opp.dexPath,
+      opp.flashLoanAmount, opp.flashLoanAsset, executorAddress
+    );
 
     if (result.success) {
       setExecutedCount(prev => prev + 1);
@@ -283,17 +317,7 @@ export default function App() {
       await incrementEngineTrades(opp.chain);
       await insertTreasuryEntry({ execution_id: execId, amount_usd: opp.netProfit, type: 'profit', chain: opp.chain });
       await insertTreasuryEntry({ execution_id: execId, amount_usd: opp.estimatedGasCost, type: 'gas_cost', chain: opp.chain });
-      pushAlert('success', `Arb submitted on ${opp.chain} (task: ${result.taskId?.slice(0, 12) || 'pending'}...)`);
-      if (result.taskId) {
-        setTimeout(async () => {
-          const status = await getTaskStatus(result.taskId!);
-          if (status.success && status.transactionHash) {
-            if (execId) await updateExecutionStatus(execId, 'confirmed', status.transactionHash);
-            pushAlert('success', `Confirmed on ${opp.chain}: tx ${status.transactionHash.slice(0, 20)}...`);
-            await refreshDbData();
-          }
-        }, 15000);
-      }
+      pushAlert('success', `Arb submitted on ${opp.chain}: tx ${result.txHash?.slice(0, 16) || 'pending'}...`);
     } else {
       if (execId) await updateExecutionStatus(execId, 'failed', undefined, result.error);
       pushAlert('error', `Execution failed on ${opp.chain}: ${result.error?.slice(0, 100)}`);
@@ -307,7 +331,6 @@ export default function App() {
 
   const netRevenue = treasurySummary.totalProfit - treasurySummary.totalGas - treasurySummary.totalFlashFee - treasurySummary.totalDeploy;
   const contractsDeployed = Object.keys(deployedContracts).length;
-  const setupComplete = setupStep === 4;
 
   if (authLoading) {
     return (
@@ -330,7 +353,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">Flash Arb Engine</h1>
-              <p className="text-xs text-slate-500">Zero Capital · Free Tier · Real Crypto</p>
+              <p className="text-xs text-slate-500">Zero Capital · Alchemy Sponsored · Flashbots Protected</p>
             </div>
           </div>
           <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6 shadow-xl">
@@ -386,16 +409,16 @@ export default function App() {
             <div>
               <h1 className="text-base font-bold text-white">Flash Arb Engine</h1>
               <p className="text-xs text-slate-500 flex items-center gap-1">
-                <Zap className="w-3 h-3 text-emerald-400" /> Zero Capital · Free Tier · {SCAN_INTERVAL_MS / 1000}s Scan
+                <Zap className="w-3 h-3 text-emerald-400" /> Zero Capital · {SCAN_INTERVAL_MS / 1000}s Scan · {contractsDeployed}/4 Chains
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
-            {gelatoStatus && (
-              <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${gelatoStatus.configured ? 'bg-emerald-950/50 border-emerald-800/50' : 'bg-amber-950/50 border-amber-800/50'}`}>
-                <div className={`w-1.5 h-1.5 rounded-full ${gelatoStatus.configured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                <span className={`text-xs ${gelatoStatus.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
-                  {gelatoStatus.configured ? 'SyncFee Live' : 'Gelato Key Needed'}
+            {alchemyStatus && (
+              <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${alchemyStatus.configured ? 'bg-emerald-950/50 border-emerald-800/50' : 'bg-amber-950/50 border-amber-800/50'}`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${alchemyStatus.configured ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                <span className={`text-xs ${alchemyStatus.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  {alchemyStatus.configured ? 'Alchemy Live' : 'Add Alchemy Key'}
                 </span>
               </div>
             )}
@@ -406,13 +429,13 @@ export default function App() {
                 {wallet.isUnlocked ? <CheckCircle className="w-3 h-3 text-emerald-400" /> : <Lock className="w-3 h-3 text-amber-400" />}
               </div>
             )}
-            {engineRunning && !setupComplete ? null : engineRunning ? (
+            {engineRunning ? (
               <button onClick={stopEngine} className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
                 <Pause className="w-4 h-4" /> Stop
               </button>
             ) : (
               setupComplete && (
-                <button onClick={handleStart} disabled={deploying} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
+                <button onClick={handleOneTapLaunch} disabled={deploying} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors">
                   {deploying ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                   {deploying ? 'Starting...' : 'Start'}
                 </button>
@@ -447,9 +470,7 @@ export default function App() {
         )}
 
         {!setupComplete ? (
-          <SetupWizard
-            step={setupStep}
-            setStep={setSetupStep}
+          <SetupView
             wallet={wallet}
             walletLoaded={walletLoaded}
             password={password}
@@ -463,10 +484,15 @@ export default function App() {
             handleGenerateWallet={handleGenerateWallet}
             handleImportWallet={handleImportWallet}
             handleUnlock={handleUnlock}
-            gelatoStatus={gelatoStatus}
+            alchemyStatus={alchemyStatus}
+            alchemyApiKey={alchemyApiKey}
+            setAlchemyApiKey={setAlchemyApiKey}
+            alchemyPolicyId={alchemyPolicyId}
+            setAlchemyPolicyId={setAlchemyPolicyId}
+            handleSaveAlchemyKey={handleSaveAlchemyKey}
             deployedContracts={deployedContracts}
             deploying={deploying}
-            handleStart={handleStart}
+            handleOneTapLaunch={handleOneTapLaunch}
             copyToClipboard={copyToClipboard}
           />
         ) : (
@@ -492,6 +518,8 @@ export default function App() {
             executing={executing}
             executeOpportunity={executeOpportunity}
             fmtDate={fmtDate}
+            statArbStats={statArbStats}
+            alchemyStatus={alchemyStatus}
           />
         )}
       </main>
@@ -499,261 +527,175 @@ export default function App() {
   );
 }
 
-function SetupWizard(props: {
-  step: Step; setStep: (s: Step) => void;
+function SetupView(props: {
   wallet: WalletState | null; walletLoaded: boolean;
   password: string; setPassword: (s: string) => void;
   showPassword: boolean; setShowPassword: (b: boolean) => void;
   showImport: boolean; setShowImport: (b: boolean) => void;
   importKeyInput: string; setImportKeyInput: (s: string) => void;
   handleGenerateWallet: () => void; handleImportWallet: () => void; handleUnlock: () => void;
-  gelatoStatus: { configured: boolean; mode: string } | null;
+  alchemyStatus: { configured: boolean; mode: string; paymasterPolicyId?: string } | null;
+  alchemyApiKey: string; setAlchemyApiKey: (s: string) => void;
+  alchemyPolicyId: string; setAlchemyPolicyId: (s: string) => void;
+  handleSaveAlchemyKey: () => void;
   deployedContracts: Record<string, string>;
-  deploying: boolean; handleStart: () => void;
+  deploying: boolean; handleOneTapLaunch: () => void;
   copyToClipboard: (s: string) => void;
 }) {
-  const steps = [
-    { num: 1, label: 'Create Wallet', icon: Wallet },
-    { num: 2, label: 'Free Gas Faucets', icon: Droplet },
-    { num: 3, label: 'Add Gelato Key', icon: Fuel },
-    { num: 4, label: 'Start Engine', icon: Rocket },
-  ] as const;
+  const walletReady = props.wallet?.isUnlocked;
+  const alchemyReady = props.alchemyStatus?.configured;
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <div className="mb-8">
-        <div className="flex items-center gap-2 mb-2">
+    <div className="max-w-2xl mx-auto space-y-6">
+      <div className="text-center mb-6">
+        <div className="flex items-center gap-2 justify-center mb-2">
           <Sparkles className="w-5 h-5 text-emerald-400" />
-          <h2 className="text-lg font-bold text-white">4-Step Quick Start</h2>
+          <h2 className="text-lg font-bold text-white">1-Tap Launch</h2>
         </div>
-        <p className="text-sm text-slate-500">Get started in minutes — 100% free, zero capital required.</p>
+        <p className="text-sm text-slate-500">Set up wallet + Alchemy key, then tap Launch. The engine handles everything else.</p>
       </div>
 
-      <div className="flex items-center justify-between mb-8 px-2">
-        {steps.map((s, i) => {
-          const done = props.step > s.num;
-          const active = props.step === s.num;
-          const Icon = s.icon;
-          return (
-            <div key={s.num} className="flex items-center">
-              <div className={`flex flex-col items-center gap-1.5 ${active ? 'scale-110' : ''} transition-transform`}>
-                <div className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-colors ${
-                  done ? 'bg-emerald-600 border-emerald-500' : active ? 'bg-slate-800 border-emerald-500' : 'bg-slate-900 border-slate-700'
-                }`}>
-                  {done ? <CheckCircle2 className="w-5 h-5 text-white" /> : <Icon className={`w-5 h-5 ${active ? 'text-emerald-400' : 'text-slate-500'}`} />}
-                </div>
-                <span className={`text-xs ${active ? 'text-emerald-400 font-medium' : done ? 'text-slate-400' : 'text-slate-600'}`}>{s.label}</span>
-              </div>
-              {i < steps.length - 1 && <div className={`w-8 sm:w-16 h-0.5 mx-1 ${done ? 'bg-emerald-600' : 'bg-slate-800'}`} />}
-            </div>
-          );
-        })}
-      </div>
-
-      {props.step === 1 && (
-        <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6">
-          <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-            <Wallet className="w-4 h-4 text-cyan-400" /> Create Your Arbitrage Wallet
-          </h3>
-          {!props.walletLoaded ? (
-            <p className="text-sm text-slate-500">Loading...</p>
-          ) : !props.wallet ? (
-            <div className="space-y-4">
-              <p className="text-sm text-slate-400">
-                This wallet receives your arbitrage profits. The private key is encrypted with AES-256 and stored securely in your account.
-              </p>
-              <div className="space-y-3">
-                <div className="relative">
-                  <input type={props.showPassword ? 'text' : 'password'} value={props.password} onChange={e => props.setPassword(e.target.value)}
-                    placeholder="Password (min 8 chars)"
-                    className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10 focus:border-emerald-600 focus:outline-none" />
-                  <button onClick={() => props.setShowPassword(!props.showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                    {props.showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                <button onClick={props.handleGenerateWallet} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors">
-                  <Wallet className="w-4 h-4" /> Generate New Wallet
-                </button>
-                {props.showImport && (
-                  <div className="space-y-2 pt-2 border-t border-slate-800">
-                    <input type="text" value={props.importKeyInput} onChange={e => props.setImportKeyInput(e.target.value)}
-                      placeholder="Private key (0x...)"
-                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-emerald-600 focus:outline-none" />
-                    <button onClick={props.handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium transition-colors">
-                      Import Wallet
-                    </button>
-                  </div>
-                )}
-                {!props.showImport && (
-                  <button onClick={() => props.setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">
-                    Import existing wallet &gt;
-                  </button>
-                )}
-              </div>
-            </div>
-          ) : !props.wallet.isUnlocked ? (
-            <div className="space-y-4">
-              <p className="text-sm text-slate-400">Wallet found: <span className="font-mono text-slate-300">{props.wallet.address}</span></p>
-              <div className="relative">
-                <input type={props.showPassword ? 'text' : 'password'} value={props.password} onChange={e => props.setPassword(e.target.value)}
-                  placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && props.handleUnlock()}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10 focus:border-emerald-600 focus:outline-none" />
-                <button onClick={() => props.setShowPassword(!props.showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
-                  {props.showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <button onClick={props.handleUnlock} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition-colors">
-                Unlock Wallet
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="bg-slate-800/50 rounded-lg p-4">
-                <p className="text-xs text-slate-500 mb-1">Wallet Address</p>
-                <p className="text-sm font-mono text-emerald-300">{props.wallet.address}</p>
-              </div>
-              <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
-                <p className="text-xs text-emerald-300 flex items-center gap-1.5">
-                  <CheckCircle className="w-3 h-3" /> Wallet ready! Profits will be sent here.
-                </p>
-              </div>
-              <button onClick={() => props.setStep(2)} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors">
-                Next: Get Free Gas <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {props.step === 2 && (
-        <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6">
-          <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-            <Droplet className="w-4 h-4 text-cyan-400" /> Get Free Gas Tokens
-          </h3>
-          <p className="text-sm text-slate-400 mb-4">
-            Even though Gelato SyncFee pays for execution gas from profit, you need a tiny amount of native token (ETH/MATIC) in your wallet for the initial contract deployment. Use these free faucets:
-          </p>
+      <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6">
+        <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+          <Wallet className="w-4 h-4 text-cyan-400" /> Step 1: Wallet
+        </h3>
+        {!props.walletLoaded ? (
+          <p className="text-sm text-slate-500">Loading...</p>
+        ) : !props.wallet ? (
           <div className="space-y-3">
-            {CHAIN_KEYS.map(chainKey => {
-              const chain = CHAINS[chainKey];
-              return (
-                <div key={chainKey} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                  <div className="w-8 h-8 rounded-lg bg-slate-700/50 flex items-center justify-center text-xs font-bold text-slate-300">
-                    {chain.nativeSymbol.slice(0, 3)}
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-slate-300">{chain.name}</p>
-                    <p className="text-xs text-slate-500">{chain.faucetNote}</p>
-                  </div>
-                  <a href={chain.faucetUrl} target="_blank" rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors">
-                    Open Faucet <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mt-4 bg-blue-950/30 rounded-lg p-3 border border-blue-800/30">
-            <p className="text-xs text-blue-300 flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>Tip: You only need ~$0.50 of gas per chain. Send it to your wallet address: <span className="font-mono">{props.wallet?.address.slice(0, 12)}...{props.wallet?.address.slice(-6)}</span></span>
-            </p>
-          </div>
-          <div className="flex gap-3 mt-4">
-            <button onClick={() => props.setStep(1)} className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition-colors">
-              Back
+            <p className="text-sm text-slate-400">Create a new wallet to receive arbitrage profits. The private key is encrypted with AES-256.</p>
+            <div className="relative">
+              <input type={props.showPassword ? 'text' : 'password'} value={props.password} onChange={e => props.setPassword(e.target.value)}
+                placeholder="Password (min 8 chars)"
+                className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10 focus:border-emerald-600 focus:outline-none" />
+              <button onClick={() => props.setShowPassword(!props.showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
+                {props.showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <button onClick={props.handleGenerateWallet} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors">
+              <Wallet className="w-4 h-4" /> Generate New Wallet
             </button>
-            <button onClick={() => props.setStep(3)} className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors">
-              Next: Add Gelato Key <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {props.step === 3 && (
-        <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6">
-          <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-            <Fuel className="w-4 h-4 text-amber-400" /> Add Free Gelato API Key
-          </h3>
-          <p className="text-sm text-slate-400 mb-4">
-            Gelato Network provides free gasless transaction relaying. Sign up at <a href="https://app.gelato.network" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 inline-flex items-center gap-0.5">app.gelato.network <ExternalLink className="w-3 h-3" /></a> and get a free API key.
-          </p>
-          <div className={`mb-4 p-3 rounded-lg border ${props.gelatoStatus?.configured ? 'bg-emerald-950/30 border-emerald-800/40' : 'bg-amber-950/30 border-amber-800/40'}`}>
-            <p className={`text-sm flex items-center gap-2 ${props.gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
-              {props.gelatoStatus?.configured ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
-              {props.gelatoStatus?.configured ? 'Gelato API key is configured! You\'re ready to go.' : 'Gelato API key is NOT configured yet.'}
-            </p>
-          </div>
-          {!props.gelatoStatus?.configured && (
-            <>
-              <p className="text-xs text-slate-500 mb-2">Add your Gelato API key as a secret:</p>
-              <div className="relative mb-4">
-                <code className="block bg-slate-800 text-emerald-300 text-xs px-3 py-2 rounded-lg overflow-x-auto">
-                  npx supabase secrets set GELATO_API_KEY=your_key_here
-                </code>
-                <button onClick={() => props.copyToClipboard('npx supabase secrets set GELATO_API_KEY=your_key_here')}
-                  className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300">
-                  <Copy className="w-3.5 h-3.5" />
+            {props.showImport && (
+              <div className="space-y-2 pt-2 border-t border-slate-800">
+                <input type="text" value={props.importKeyInput} onChange={e => props.setImportKeyInput(e.target.value)}
+                  placeholder="Private key (0x...)"
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-emerald-600 focus:outline-none" />
+                <button onClick={props.handleImportWallet} className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium transition-colors">
+                  Import Wallet
                 </button>
               </div>
-              <div className="bg-amber-950/30 rounded-lg p-3 border border-amber-800/30 mb-4">
-                <p className="text-xs text-amber-300">
-                  After setting the secret, click the refresh button to check if it's detected.
-                </p>
-              </div>
-            </>
-          )}
-          <div className="flex gap-3">
-            <button onClick={() => props.setStep(2)} className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition-colors">
-              Back
-            </button>
-            <button onClick={() => props.setStep(4)} className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-colors">
-              Next: Start Engine <ArrowRight className="w-4 h-4" />
+            )}
+            {!props.showImport && (
+              <button onClick={() => props.setShowImport(true)} className="w-full text-sm text-slate-400 hover:text-slate-300">
+                Import existing wallet &gt;
+              </button>
+            )}
+          </div>
+        ) : !props.wallet.isUnlocked ? (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-400">Wallet: <span className="font-mono text-slate-300">{props.wallet.address}</span></p>
+            <div className="relative">
+              <input type={props.showPassword ? 'text' : 'password'} value={props.password} onChange={e => props.setPassword(e.target.value)}
+                placeholder="Enter password to unlock" onKeyDown={e => e.key === 'Enter' && props.handleUnlock()}
+                className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white pr-10 focus:border-emerald-600 focus:outline-none" />
+              <button onClick={() => props.setShowPassword(!props.showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500">
+                {props.showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <button onClick={props.handleUnlock} className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition-colors">
+              Unlock Wallet
             </button>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="space-y-3">
+            <div className="bg-slate-800/50 rounded-lg p-4">
+              <p className="text-xs text-slate-500 mb-1">Wallet Address</p>
+              <p className="text-sm font-mono text-emerald-300">{props.wallet.address}</p>
+            </div>
+            <div className="bg-emerald-950/30 rounded-lg p-3 border border-emerald-800/30">
+              <p className="text-xs text-emerald-300 flex items-center gap-1.5">
+                <CheckCircle className="w-3 h-3" /> Wallet ready! Profits will be sent here.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
 
-      {props.step === 4 && (
-        <div className="bg-slate-900/50 rounded-2xl border border-emerald-800/40 p-6">
-          <h3 className="text-sm font-semibold text-emerald-300 mb-4 flex items-center gap-2">
-            <Rocket className="w-4 h-4 text-emerald-400" /> Start Your Arbitrage Engine
-          </h3>
-          <p className="text-sm text-slate-400 mb-4">
-            Click the button below to deploy executor contracts and start scanning. The engine will:
+      <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-6">
+        <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+          <KeyRound className="w-4 h-4 text-amber-400" /> Step 2: Alchemy API Key
+        </h3>
+        <p className="text-sm text-slate-400 mb-4">
+          Alchemy provides free RPC access and gas sponsorship via their Gas Manager. Get a free API key at{' '}
+          <a href="https://www.alchemy.com" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:text-cyan-300 inline-flex items-center gap-0.5">
+            alchemy.com <ExternalLink className="w-3 h-3" />
+          </a>. The free tier includes $50/month in sponsored gas.
+        </p>
+        <div className={`mb-4 p-3 rounded-lg border ${props.alchemyStatus?.configured ? 'bg-emerald-950/30 border-emerald-800/40' : 'bg-amber-950/30 border-amber-800/40'}`}>
+          <p className={`text-sm flex items-center gap-2 ${props.alchemyStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}`}>
+            {props.alchemyStatus?.configured ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+            {props.alchemyStatus?.configured ? 'Alchemy API key configured!' : 'Alchemy API key needed for gas sponsorship.'}
           </p>
-          <div className="space-y-2 mb-6">
-            {[
-              'Deploy executor contracts to all 4 chains (zero gas via Gelato SyncFee)',
-              'Scan real DEX prices every 5 seconds across Polygon, Arbitrum, Optimism, and Base',
-              'Detect price differences between Uniswap V3, SushiSwap, and QuickSwap',
-              'Auto-execute profitable arbitrage via flash loans (Balancer 0% fee)',
-              'Collect profit to your wallet — 85% to you, 5% Gelato fee, 10% reserve',
-            ].map((step, i) => (
-              <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
-                <div className="w-6 h-6 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">{i + 1}</div>
-                <span className="text-sm text-slate-400">{step}</span>
-              </div>
-            ))}
-          </div>
-          <div className="bg-emerald-950/30 rounded-lg p-4 border border-emerald-800/30 mb-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-4 h-4 text-emerald-400" />
-              <p className="text-sm font-semibold text-emerald-300">Ready to Launch</p>
-            </div>
-            <div className="grid grid-cols-3 gap-3 text-xs">
-              <div><p className="text-slate-500">Wallet</p><p className="text-emerald-300">{props.wallet?.isUnlocked ? 'Ready' : 'Locked'}</p></div>
-              <div><p className="text-slate-500">Gelato</p><p className={props.gelatoStatus?.configured ? 'text-emerald-300' : 'text-amber-300'}>{props.gelatoStatus?.configured ? 'Connected' : 'Pending'}</p></div>
-              <div><p className="text-slate-500">Contracts</p><p className="text-emerald-300">{Object.keys(props.deployedContracts).length}/4</p></div>
-            </div>
-          </div>
-          <button onClick={props.handleStart} disabled={props.deploying || !props.wallet?.isUnlocked}
-            className="w-full px-4 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors">
-            {props.deploying ? <RefreshCcw className="w-5 h-5 animate-spin" /> : <Rocket className="w-5 h-5" />}
-            {props.deploying ? 'Deploying & Starting...' : 'Launch Engine'}
+        </div>
+        <div className="space-y-3">
+          <input type="text" value={props.alchemyApiKey} onChange={e => props.setAlchemyApiKey(e.target.value)}
+            placeholder="Alchemy API key (e.g. a1b2c3d4...)"
+            className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-emerald-600 focus:outline-none" />
+          <input type="text" value={props.alchemyPolicyId} onChange={e => props.setAlchemyPolicyId(e.target.value)}
+            placeholder="Paymaster Policy ID (optional, for gas sponsorship)"
+            className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white font-mono focus:border-emerald-600 focus:outline-none" />
+          <button onClick={props.handleSaveAlchemyKey} className="w-full px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium transition-colors">
+            Save Alchemy Key
           </button>
         </div>
-      )}
+        <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+          <div className="bg-blue-950/30 rounded-lg p-3 border border-blue-800/30">
+            <p className="text-blue-300 flex items-start gap-2">
+              <Fuel className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>Free $50/mo sponsored gas via Alchemy Gas Manager (ERC-4337 paymaster)</span>
+            </p>
+          </div>
+          <div className="bg-cyan-950/30 rounded-lg p-3 border border-cyan-800/30">
+            <p className="text-cyan-300 flex items-start gap-2">
+              <Shield className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>Flashbots Protect RPC for MEV-resistant transaction submission</span>
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-slate-900/50 rounded-2xl border border-emerald-800/40 p-6">
+        <h3 className="text-sm font-semibold text-emerald-300 mb-4 flex items-center gap-2">
+          <Rocket className="w-4 h-4 text-emerald-400" /> Step 3: Launch
+        </h3>
+        <p className="text-sm text-slate-400 mb-4">One tap deploys executor contracts to all chains and starts scanning. The engine will:</p>
+        <div className="space-y-2 mb-6">
+          {[
+            'Deploy executor contracts via CREATE2 deterministic addresses',
+            'Scan real DEX prices across Polygon, Arbitrum, Optimism, and Base',
+            'Detect cross-DEX, statistical arbitrage (Z-score), and long-tail token opportunities',
+            'Auto-execute via Balancer 0% flash loans with Flashbots MEV protection',
+            'Collect profit to your wallet — 90% to you, 10% gas reserve',
+          ].map((step, i) => (
+            <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+              <div className="w-6 h-6 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs flex-shrink-0">{i + 1}</div>
+              <span className="text-sm text-slate-400">{step}</span>
+            </div>
+          ))}
+        </div>
+        <div className="bg-emerald-950/30 rounded-lg p-4 border border-emerald-800/30 mb-4">
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div><p className="text-slate-500">Wallet</p><p className={walletReady ? 'text-emerald-300' : 'text-amber-300'}>{walletReady ? 'Ready' : 'Pending'}</p></div>
+            <div><p className="text-slate-500">Alchemy</p><p className={alchemyReady ? 'text-emerald-300' : 'text-amber-300'}>{alchemyReady ? 'Connected' : 'Pending'}</p></div>
+            <div><p className="text-slate-500">Contracts</p><p className="text-emerald-300">{Object.keys(props.deployedContracts).length}/4</p></div>
+          </div>
+        </div>
+        <button onClick={props.handleOneTapLaunch} disabled={props.deploying || !walletReady}
+          className="w-full px-4 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-colors">
+          {props.deploying ? <RefreshCcw className="w-5 h-5 animate-spin" /> : <Rocket className="w-5 h-5" />}
+          {props.deploying ? 'Deploying & Starting...' : 'Launch Engine'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -769,23 +711,26 @@ function Dashboard(props: {
   minProfit: string; setMinProfit: (s: string) => void;
   executing: boolean; executeOpportunity: (o: ArbitrageOpportunity) => void;
   fmtDate: (s: string) => string;
+  statArbStats: { pair: string; chain: string; samples: number; mean: number; stdDev: number; currentZ: number }[];
+  alchemyStatus: { configured: boolean; mode: string; paymasterPolicyId?: string } | null;
 }) {
-  const [view, setView] = useState<'overview' | 'opportunities' | 'revenue' | 'settings'>('overview');
+  const [view, setView] = useState<'overview' | 'opportunities' | 'revenue' | 'starvarb' | 'settings'>('overview');
   const navItems = [
     { key: 'overview' as const, label: 'Overview', icon: Cpu },
     { key: 'opportunities' as const, label: 'Opportunities', icon: TrendingUp },
+    { key: 'starvarb' as const, label: 'Stat Arb', icon: BarChart3 },
     { key: 'revenue' as const, label: 'Revenue', icon: DollarSign },
-    { key: 'settings' as const, label: 'Settings', icon: Activity },
+    { key: 'settings' as const, label: 'Settings', icon: Settings },
   ];
 
   return (
     <div>
-      <div className="flex gap-1 mb-6 bg-slate-900/30 rounded-xl p-1 border border-slate-800">
+      <div className="flex gap-1 mb-6 bg-slate-900/30 rounded-xl p-1 border border-slate-800 overflow-x-auto">
         {navItems.map(item => {
           const Icon = item.icon;
           return (
             <button key={item.key} onClick={() => setView(item.key)}
-              className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              className={`flex-1 min-w-fit flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
                 view === item.key ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-300'
               }`}>
               <Icon className="w-4 h-4" /> <span className="hidden sm:inline">{item.label}</span>
@@ -814,9 +759,9 @@ function Dashboard(props: {
             <div className="flex items-center gap-3">
               <Zap className="w-5 h-5 text-emerald-400 flex-shrink-0" />
               <div>
-                <p className="text-sm font-semibold text-emerald-300">100% Zero-Capital · Real DEX Price Feeds</p>
+                <p className="text-sm font-semibold text-emerald-300">Zero-Capital · 3 Arbitrage Strategies · MEV Protected</p>
                 <p className="text-xs text-slate-400">
-                  Balancer 0% flash loans + Gelato SyncFee. Live Uniswap V3 + SushiSwap + QuickSwap quotes. Scans every {SCAN_INTERVAL_MS / 1000}s across {CHAIN_KEYS.length} chains.
+                  Cross-DEX + Statistical (Z-score) + Long-tail tokens. Balancer 0% flash loans. Flashbots Protect RPC. Alchemy Gas Manager sponsorship. Scans every {SCAN_INTERVAL_MS / 1000}s across {CHAIN_KEYS.length} chains.
                 </p>
               </div>
             </div>
@@ -868,10 +813,16 @@ function Dashboard(props: {
               <div className="space-y-2">
                 {props.allOpportunities.slice(0, 10).map((opp) => (
                   <div key={opp.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded ${
+                      opp.strategy === 'statistical' ? 'bg-cyan-950/50 text-cyan-300'
+                      : opp.strategy === 'long_tail' ? 'bg-amber-950/50 text-amber-300'
+                      : 'bg-emerald-950/50 text-emerald-300'
+                    }`}>{opp.strategy}</span>
                     <span className="text-xs text-slate-400 w-16">{opp.chain}</span>
                     <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
                     <span className="text-xs text-slate-500">{opp.buyDex} {'->'} {opp.sellDex}</span>
                     <span className="text-xs text-cyan-400">{opp.spreadPct.toFixed(2)}%</span>
+                    {opp.zScore && <span className="text-xs text-cyan-300">z={opp.zScore.toFixed(2)}</span>}
                     <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(4)}</span>
                     {props.wallet?.isUnlocked && props.deployedContracts[opp.chain] && (
                       <button onClick={() => props.executeOpportunity(opp)} disabled={props.executing}
@@ -897,10 +848,16 @@ function Dashboard(props: {
               <div className="space-y-2">
                 {props.allOpportunities.map((opp) => (
                   <div key={opp.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded ${
+                      opp.strategy === 'statistical' ? 'bg-cyan-950/50 text-cyan-300'
+                      : opp.strategy === 'long_tail' ? 'bg-amber-950/50 text-amber-300'
+                      : 'bg-emerald-950/50 text-emerald-300'
+                    }`}>{opp.strategy}</span>
                     <span className="text-xs text-slate-400 w-16">{opp.chain}</span>
                     <span className="text-xs font-mono text-slate-300 flex-1 truncate">{opp.tokenPath.join(' -> ')}</span>
                     <span className="text-xs text-slate-500">{opp.buyDex} {'->'} {opp.sellDex}</span>
                     <span className="text-xs text-cyan-400">{opp.spreadPct.toFixed(2)}%</span>
+                    {opp.zScore && <span className="text-xs text-cyan-300">z={opp.zScore.toFixed(2)}</span>}
                     <span className="text-xs font-semibold text-emerald-400">+${opp.netProfit.toFixed(4)}</span>
                     <span className="text-xs text-slate-400">{(opp.confidenceScore * 100).toFixed(0)}%</span>
                   </div>
@@ -944,6 +901,81 @@ function Dashboard(props: {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {view === 'starvarb' && (
+        <div className="space-y-4">
+          <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-cyan-400" /> Statistical Arbitrage Model
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Non-latency-dependent strategy: tracks spread history between DEX pairs, computes Z-scores, and signals when spreads deviate beyond 2 standard deviations. Bets on mean reversion rather than racing bots for speed.
+            </p>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-800/30 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-500">Tracked Pairs</p>
+                <p className="text-lg font-bold text-cyan-400">{props.statArbStats.length}</p>
+              </div>
+              <div className="bg-slate-800/30 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-500">Active Signals</p>
+                <p className="text-lg font-bold text-emerald-400">{props.statArbStats.filter(s => Math.abs(s.currentZ) >= 2).length}</p>
+              </div>
+              <div className="bg-slate-800/30 rounded-lg p-3 text-center">
+                <p className="text-xs text-slate-500">Max |Z|</p>
+                <p className="text-lg font-bold text-amber-400">{props.statArbStats.length > 0 ? Math.max(...props.statArbStats.map(s => Math.abs(s.currentZ))).toFixed(2) : '0.00'}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4">Z-Score Monitor</h3>
+            {props.statArbStats.length === 0 ? (
+              <p className="text-sm text-slate-500 text-center py-8">No data yet. Run scans to build spread history.</p>
+            ) : (
+              <div className="space-y-2">
+                {props.statArbStats.map((s, i) => {
+                  const z = s.currentZ;
+                  const absZ = Math.abs(z);
+                  const signal = absZ >= 2.0;
+                  return (
+                    <div key={i} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                      <span className="text-xs text-slate-400 w-16">{s.chain}</span>
+                      <span className="text-xs font-mono text-slate-300 w-24">{s.pair}</span>
+                      <span className="text-xs text-slate-500">n={s.samples}</span>
+                      <span className="text-xs text-slate-400">mean={s.mean.toFixed(3)}</span>
+                      <span className="text-xs text-slate-400">sd={s.stdDev.toFixed(3)}</span>
+                      <div className="flex-1" />
+                      <div className="flex items-center gap-2">
+                        <div className="w-24 h-2 bg-slate-700 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${absZ > 3 ? 'bg-red-500' : absZ > 2 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                            style={{ width: `${Math.min(absZ / 5 * 100, 100)}%` }} />
+                        </div>
+                        <span className={`text-xs font-bold w-12 text-right ${signal ? 'text-amber-400' : 'text-slate-400'}`}>
+                          z={z.toFixed(2)}
+                        </span>
+                        {signal && <span className="text-xs px-2 py-0.5 rounded bg-amber-950/50 text-amber-300">SIGNAL</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+              <Target className="w-4 h-4 text-emerald-400" /> How It Works
+            </h3>
+            <div className="space-y-3 text-sm text-slate-400">
+              <p><span className="text-cyan-400 font-medium">1. Spread Tracking:</span> Every scan records the price spread between DEX pairs (e.g., WETH-USDC on Uniswap vs SushiSwap).</p>
+              <p><span className="text-cyan-400 font-medium">2. Z-Score Calculation:</span> After 20+ samples, the model computes a rolling mean and standard deviation. The Z-score measures how far the current spread deviates from the historical mean.</p>
+              <p><span className="text-cyan-400 font-medium">3. Signal Generation:</span> When {'|Z|'} {'>='} 2.0, the spread is statistically unusual. A CONVERGENCE signal (Z {'>'} 0) means the spread is too wide and should narrow. A DIVERGENCE signal (Z {'<'} 0) means it's too tight and should widen.</p>
+              <p><span className="text-cyan-400 font-medium">4. Execution:</span> The engine executes a flash loan trade betting on the reversion to the mean. This doesn't require low latency — it requires the spread to eventually revert, which it statistically does.</p>
+              <p><span className="text-emerald-400 font-medium">5. Long-Tail Advantage:</span> By including lower-cap tokens (LDO, GMX, ARB, DEGEN, etc.), the model finds wider spreads with less bot competition. Corporate bots focus on high-liquidity pairs; we exploit the long tail.</p>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1014,7 +1046,7 @@ function Dashboard(props: {
         <div className="max-w-2xl space-y-4">
           <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
             <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-              <Activity className="w-4 h-4 text-cyan-400" /> Engine Settings
+              <Settings className="w-4 h-4 text-cyan-400" /> Engine Settings
             </h3>
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -1041,7 +1073,7 @@ function Dashboard(props: {
 
           <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
             <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
-              <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts
+              <Cpu className="w-4 h-4 text-cyan-400" /> Executor Contracts (CREATE2)
             </h3>
             <div className="space-y-2">
               {CHAIN_KEYS.map(chainKey => {
@@ -1053,11 +1085,69 @@ function Dashboard(props: {
                     {addr ? (
                       <><code className="text-xs font-mono text-emerald-300 flex-1 truncate">{addr}</code><CheckCircle className="w-4 h-4 text-emerald-400" /></>
                     ) : (
-                      <><span className="text-xs text-slate-500 flex-1">Auto-deploys via Gelato</span></>
+                      <><span className="text-xs text-slate-500 flex-1">Auto-deploys on launch</span></>
                     )}
                   </div>
                 );
               })}
+            </div>
+          </div>
+
+          <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+              <Shield className="w-4 h-4 text-cyan-400" /> Infrastructure
+            </h3>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between bg-slate-800/30 rounded-lg px-4 py-3">
+                <div>
+                  <p className="font-medium text-slate-300">Alchemy Gas Manager</p>
+                  <p className="text-xs text-slate-500">ERC-4337 paymaster for gas sponsorship</p>
+                </div>
+                <span className={`text-xs ${props.alchemyStatus?.configured ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {props.alchemyStatus?.configured ? 'Connected' : 'Not configured'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between bg-slate-800/30 rounded-lg px-4 py-3">
+                <div>
+                  <p className="font-medium text-slate-300">Flashbots Protect</p>
+                  <p className="text-xs text-slate-500">MEV-resistant private mempool submission</p>
+                </div>
+                <span className="text-xs text-emerald-400">Active</span>
+              </div>
+              <div className="flex items-center justify-between bg-slate-800/30 rounded-lg px-4 py-3">
+                <div>
+                  <p className="font-medium text-slate-300">Statistical Arbitrage</p>
+                  <p className="text-xs text-slate-500">Z-score mean reversion model (non-latency)</p>
+                </div>
+                <span className="text-xs text-emerald-400">Enabled</span>
+              </div>
+              <div className="flex items-center justify-between bg-slate-800/30 rounded-lg px-4 py-3">
+                <div>
+                  <p className="font-medium text-slate-300">Long-Tail Token Scanner</p>
+                  <p className="text-xs text-slate-500">Low-cap tokens with wider spreads, less bot competition</p>
+                </div>
+                <span className="text-xs text-emerald-400">Enabled</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6">
+            <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+              <Bug className="w-4 h-4 text-amber-400" /> Debug & Diagnostics
+            </h3>
+            <div className="space-y-3 text-sm">
+              {props.engineStatusRecords.map(s => (
+                <div key={s.id} className="flex items-center gap-3 bg-slate-800/30 rounded-lg px-4 py-3">
+                  <div className={`w-2 h-2 rounded-full ${s.status === 'scanning' ? 'bg-emerald-400 animate-pulse' : s.status === 'error' ? 'bg-red-400' : 'bg-slate-600'}`} />
+                  <span className="font-medium w-20">{s.chain}</span>
+                  <span className="text-xs text-slate-400">status: {s.status}</span>
+                  <span className="text-xs text-slate-400">block: {s.current_block || 0}</span>
+                  <span className="text-xs text-slate-400">latency: {s.rpc_latency_ms || 0}ms</span>
+                  <span className="text-xs text-slate-400">opps: {s.opportunities_found || 0}</span>
+                  <span className="text-xs text-slate-400">trades: {s.trades_executed || 0}</span>
+                  {s.error_message && <span className="text-xs text-red-400 truncate max-w-48">{s.error_message}</span>}
+                </div>
+              ))}
             </div>
           </div>
 
